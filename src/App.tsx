@@ -7,7 +7,7 @@ import { NetworkDashboard } from './components/NetworkDashboard';
 
 export default function App() {
   return (
-    <main className="min-h-screen selection:bg-scan-accent selection:text-white">
+    <main className="runescan-shell min-h-screen selection:bg-scan-accent selection:text-white">
       <NetworkDashboard />
     </main>
   );

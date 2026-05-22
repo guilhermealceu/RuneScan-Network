@@ -1,20 +1,88 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Nunito+Sans:wght@400;500;600;700;800&family=Source+Code+Pro:wght@400;500;600;700&display=swap');
 @import "tailwindcss";
 
 @theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-sans: "Nunito Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Source Code Pro", ui-monospace, SFMono-Regular, monospace;
   
-  --color-scan-bg: #E4E3E0;
-  --color-scan-ink: #141414;
-  --color-scan-line: rgba(20, 20, 20, 0.1);
-  --color-scan-accent: #FF6321;
+  --color-scan-bg: #eef2f4;
+  --color-scan-ink: #101418;
+  --color-scan-line: rgba(16, 20, 24, 0.1);
+  --color-scan-accent: #ff5f1f;
+}
+
+html {
+  min-height: 100%;
 }
 
 body {
-  background-color: var(--color-scan-bg);
+  min-height: 100%;
+  background:
+    radial-gradient(circle at 50% 24%, rgba(255, 255, 255, 0.92) 0 18%, rgba(255, 255, 255, 0.62) 48%, rgba(16, 20, 24, 0.12) 100%),
+    linear-gradient(90deg, rgba(16, 20, 24, 0.055) 1px, transparent 1px),
+    linear-gradient(rgba(16, 20, 24, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(16, 20, 24, 0.035) 1px, transparent 1px),
+    linear-gradient(rgba(16, 20, 24, 0.035) 1px, transparent 1px),
+    var(--color-scan-bg);
+  background-size: auto, 28px 28px, 28px 28px, 140px 140px, 140px 140px, auto;
+  background-position: center top;
   color: var(--color-scan-ink);
   font-family: var(--font-sans);
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(circle at center, transparent 0 42%, rgba(16, 20, 24, 0.12) 100%);
+  mix-blend-mode: multiply;
+}
+
+@layer components {
+  .runescan-shell {
+    position: relative;
+    isolation: isolate;
+  }
+
+  .runescan-dashboard {
+    position: relative;
+    z-index: 1;
+  }
+
+  .runescan-dashboard::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background-image: radial-gradient(circle, rgba(16, 20, 24, 0.16) 1px, transparent 1px);
+    background-size: 28px 28px;
+    opacity: 0.18;
+    z-index: -1;
+  }
+
+  .panel-surface {
+    border: 1px solid rgba(16, 20, 24, 0.1);
+    background: rgba(255, 255, 255, 0.82);
+    box-shadow: 0 18px 48px rgba(16, 20, 24, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.76);
+    backdrop-filter: blur(14px);
+  }
+
+  .panel-surface-subtle {
+    border: 1px solid rgba(16, 20, 24, 0.08);
+    background: rgba(255, 255, 255, 0.66);
+    box-shadow: 0 10px 30px rgba(16, 20, 24, 0.06);
+    backdrop-filter: blur(10px);
+  }
+
+  .command-bar {
+    border: 1px solid rgba(16, 20, 24, 0.1);
+    background:
+      linear-gradient(135deg, rgba(255, 255, 255, 0.94), rgba(248, 250, 250, 0.78)),
+      linear-gradient(90deg, transparent, rgba(255, 95, 31, 0.08));
+    box-shadow: 0 18px 40px rgba(16, 20, 24, 0.11), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+    backdrop-filter: blur(16px);
+  }
 }
 
 .data-grid-border {
