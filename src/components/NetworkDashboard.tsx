@@ -34,7 +34,7 @@ import {
   Video,
   Zap,
 } from 'lucide-react';
-import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip as ChartTooltip, LineChart, Line, XAxis, YAxis } from 'recharts';
+import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip as ChartTooltip, LineChart, Line, AreaChart, Area, XAxis, YAxis } from 'recharts';
 
 interface AppConfig {
   defaultCidr: string;
@@ -317,11 +317,11 @@ export const NetworkDashboard: React.FC = () => {
   }, []);
 
   return (
-    <div className="runescan-dashboard mx-auto flex max-w-7xl flex-col gap-6 p-4 md:p-8">
+    <div className="runescan-dashboard mx-auto flex w-full max-w-[1800px] flex-col gap-8 p-4 md:p-8 lg:p-12">
       <motion.header
         layout
         transition={{ layout: { duration: 0.28, ease: 'easeOut' } }}
-        className={`panel-surface overflow-visible rounded-xl transition-all ${headerCompact ? 'p-3 md:p-4' : 'p-5 md:p-6'}`}
+        className={`panel-surface overflow-visible rounded-3xl transition-all ${headerCompact ? 'p-3 md:p-4' : 'p-6 md:p-10'}`}
       >
         <div className={`flex flex-col ${headerCompact ? 'gap-3' : 'gap-7'}`}>
           <AnimatePresence initial={false}>
@@ -334,14 +334,21 @@ export const NetworkDashboard: React.FC = () => {
                 transition={{ duration: 0.22, ease: 'easeOut' }}
                 className="overflow-hidden"
               >
-                <div className="grid gap-6 lg:grid-cols-[240px_minmax(0,1fr)] lg:items-start">
-                  <h1 className="text-4xl font-semibold leading-[0.95] tracking-normal md:text-5xl">RuneScan Network</h1>
-                  <div className="grid max-w-4xl gap-3 pt-1 text-sm leading-6 text-black/65 md:grid-cols-4 lg:pt-2">
-                    <ValueCard text="Descobre hosts por ARP, ICMP, TCP, DNS reverso e ranges." />
-                    <ValueCard text="Identifica portas, servicos, paginas web, certificados e fabricantes." />
-                    <ValueCard text="Mostra risco, RDP, SMB, Telnet, acessos e diagnosticos por host." />
-                    <ValueCard text="Infere sub-redes, pools e topologia; pronto para SNMP, SSH e TShark." />
+                <div className="grid gap-8 lg:grid-cols-[1fr_2fr] lg:items-center">
+                  <div className="flex flex-col">
+                    <h1 className="text-5xl font-black leading-[0.85] tracking-tight md:text-6xl lg:text-8xl text-scan-ink">
+                      RUNESCAN<br/><span className="text-scan-accent">NETWORK</span>
+                    </h1>
+                    <p className="mt-4 text-[10px] font-black uppercase tracking-[0.3em] text-black/30">Enterprise Intelligence • v2.4.0</p>
                   </div>
+                  {!scanResult && (
+                    <div className="grid gap-3 pt-1 text-sm leading-6 text-black/65 sm:grid-cols-2 xl:grid-cols-4 lg:pt-2">
+                      <ValueCard text="Mapping via ARP, ICMP, TCP, Reverse DNS." />
+                      <ValueCard text="Service fingerprinting & Web analysis." />
+                      <ValueCard text="Risk audit for RDP, SMB, Telnet." />
+                      <ValueCard text="Pool inference & Topology map." />
+                    </div>
+                  )}
                 </div>
               </motion.div>
             )}
@@ -480,7 +487,7 @@ export const NetworkDashboard: React.FC = () => {
         </div>
       )}
 
-      <section className="grid grid-cols-2 gap-3 lg:grid-cols-6">
+      <section className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
         <StatCard label="Ativos" value={scanResult?.summary.total || 0} icon={<Cpu className="h-4 w-4" />} />
         <StatCard label="Online" value={scanResult?.summary.online || 0} icon={<Zap className="h-4 w-4 text-green-600" />} />
         <StatCard label="Segmentos" value={scanResult?.summary.vlans || 0} icon={<LayoutGrid className="h-4 w-4" />} />
@@ -515,15 +522,15 @@ export const NetworkDashboard: React.FC = () => {
         />
       )}
 
-      <section className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-        <div className="lg:col-span-4">
-          <div className="sticky top-6 flex flex-col gap-4">
+      <section className="grid grid-cols-1 gap-8 lg:grid-cols-12">
+        <div className="lg:col-span-4 xl:col-span-3">
+          <div className="sticky top-10 flex flex-col gap-6">
             <NetworkTree result={scanResult} devices={scanResult?.devices || []} onSelectDevice={selectDevice} />
             <SegmentPanel result={scanResult} />
           </div>
         </div>
 
-        <div ref={detailsRef} className="lg:col-span-8">
+        <div ref={detailsRef} className="lg:col-span-8 xl:col-span-9">
           <AnimatePresence mode="wait">
             {!selectedDevice ? (
               <motion.div
@@ -613,25 +620,26 @@ const StatCard = ({
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 10, scale: 0.98 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ duration: 0.28, ease: 'easeOut' }}
-      whileHover={onClick ? { y: -3 } : { y: -2 }}
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      whileHover={onClick ? { y: -4, scale: 1.01 } : { y: -2 }}
     >
-    <Component
-      type={onClick ? 'button' : undefined}
-      onClick={onClick}
-      title={title}
-      className={`panel-surface-subtle flex min-h-24 w-full flex-col justify-between rounded-xl p-4 text-left transition ${onClick ? 'cursor-pointer hover:border-red-200 hover:bg-red-50/60 hover:shadow-md' : ''}`}
-    >
-    <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-black/40">
-      {icon}
-      {label}
-    </div>
-    <div className={`font-mono font-black tracking-normal ${compact ? 'truncate text-sm' : 'text-3xl'}`}>
-      {numericValue === null ? value : <AnimatedNumber value={numericValue} />}
-    </div>
-    </Component>
+      <Component
+        type={onClick ? 'button' : undefined}
+        onClick={onClick}
+        title={title}
+        className={`panel-surface-subtle flex min-h-28 w-full flex-col justify-between rounded-2xl p-5 text-left transition-all backdrop-blur-md ${onClick ? 'cursor-pointer hover:ring-2 hover:ring-scan-accent/20' : ''}`}
+      >
+        <div className="flex items-center gap-2.5 text-[10px] font-black uppercase tracking-[0.18em] text-black/30">
+          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-black/5 text-black/40">
+            {icon}
+          </div>
+          {label}
+        </div>
+        <div className={`mt-3 font-mono font-black tracking-tighter text-scan-ink ${compact ? 'truncate text-lg' : 'text-4xl'}`}>
+          {numericValue === null ? value : <AnimatedNumber value={numericValue} />}
+        </div>
+      </Component>
     </motion.div>
   );
 };
@@ -650,13 +658,15 @@ const AnimatedNumber = ({ value }: { value: number }) => {
 
 const ValueCard = ({ text }: { text: string }) => (
   <motion.div
-    initial={{ opacity: 0, y: 8 }}
-    animate={{ opacity: 1, y: 0 }}
-    whileHover={{ y: -2, scale: 1.01 }}
-    transition={{ duration: 0.25, ease: 'easeOut' }}
-    className="rounded-lg border border-scan-line bg-white/55 p-3 shadow-sm"
+    initial={{ opacity: 0, scale: 0.96 }}
+    animate={{ opacity: 1, scale: 1 }}
+    whileHover={{ y: -3, scale: 1.02 }}
+    className="group flex items-center gap-4 rounded-2xl border border-scan-line bg-white/40 p-4 transition-all hover:bg-white hover:shadow-xl backdrop-blur-sm"
   >
-    <p>{text}</p>
+    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-scan-ink/5 group-hover:bg-scan-accent/10">
+      <CheckCircle2 className="h-4 w-4 text-scan-ink group-hover:text-scan-accent" />
+    </div>
+    <p className="text-sm font-bold leading-tight text-black/70">{text}</p>
   </motion.div>
 );
 
@@ -1272,67 +1282,154 @@ const ExecutiveInsights = ({ result, onSelectDevice }: { result: ScanResult; onS
 const InsightMetrics = ({ result }: { result: ScanResult }) => {
   const online = result.devices.filter((device) => device.status === 'online');
   const riskData = [
-    { name: 'Alto', value: online.filter((device) => device.riskLevel === 'high').length, color: '#ef4444' },
-    { name: 'Medio', value: online.filter((device) => device.riskLevel === 'medium').length, color: '#f97316' },
-    { name: 'Baixo', value: online.filter((device) => device.riskLevel === 'low').length, color: '#22c55e' },
+    { name: 'Crítico', value: online.filter((device) => device.riskLevel === 'high').length, color: '#ef4444' },
+    { name: 'Atenção', value: online.filter((device) => device.riskLevel === 'medium').length, color: '#f59e0b' },
+    { name: 'Seguro', value: online.filter((device) => device.riskLevel === 'low').length, color: '#10b981' },
   ].filter((item) => item.value > 0);
-  const subnetData = result.vlans.slice(0, 8).map((vlan, index) => ({
-    name: vlan.subnet.replace('/24', ''),
+  
+  const subnetData = result.vlans.slice(0, 15).map((vlan, index) => ({
+    name: vlan.subnet,
+    label: vlan.subnet.split('.')[2] + '.x',
     ativos: vlan.onlineCount,
-    index: index + 1,
+    index
   }));
-  const exposureCount = online.filter((device) => [23, 3389, 445, 135].some((port) => device.openPorts?.includes(port))).length;
+
+  // Ensure visualization width and rhythm
+  if (subnetData.length < 2) {
+    subnetData.unshift({ name: 'Idle pool', label: '0.x', ativos: 0, index: -1 });
+  }
+  
+  const exposureCount = online.filter((device) => [21, 23, 3389, 445, 135, 5900].some((port) => device.openPorts?.includes(port))).length;
   const webCount = online.filter((device) => getWebFingerprints(device).length > 0).length;
+  const telnetCount = online.filter((device) => device.openPorts?.includes(23)).length;
 
   return (
-    <div className="mb-4 grid gap-3 lg:grid-cols-[0.9fr_1.2fr_0.9fr]">
-      <div className="rounded-xl border border-scan-line bg-white/65 p-3">
-        <p className="mb-2 text-xs font-bold uppercase tracking-widest text-black/35">Risco</p>
-        <div className="h-32">
+    <div className="mb-10 grid gap-6 xl:grid-cols-[1fr_2fr_1fr]">
+      <motion.div 
+        initial={{ opacity: 0, x: -20 }}
+        animate={{ opacity: 1, x: 0 }}
+        className="rounded-[2.5rem] border border-scan-line bg-white/40 p-8 shadow-2xl backdrop-blur-xl"
+      >
+        <div className="mb-6 flex items-center justify-between">
+          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-black/40">Risk Distribution</p>
+          <ShieldAlert className="h-4 w-4 text-black/20" />
+        </div>
+        <div className="h-56">
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
-              <Pie data={riskData.length ? riskData : [{ name: 'Sem dados', value: 1, color: '#d4d4d4' }]} dataKey="value" innerRadius={34} outerRadius={52} paddingAngle={3}>
-                {(riskData.length ? riskData : [{ color: '#d4d4d4' }]).map((entry, index) => <Cell key={index} fill={entry.color} />)}
+              <Pie 
+                data={riskData.length ? riskData : [{ name: 'Empty', value: 1, color: '#f8fafc' }]} 
+                dataKey="value" 
+                innerRadius={65} 
+                outerRadius={95} 
+                paddingAngle={8}
+                cornerRadius={12}
+                stroke="none"
+              >
+                {(riskData.length ? riskData : [{ color: '#f1f5f9' }]).map((entry, index) => (
+                  <Cell key={`cell-${index}`} fill={entry.color} className="outline-none" />
+                ))}
               </Pie>
-              <ChartTooltip />
+              <ChartTooltip 
+                content={({ active, payload }) => {
+                  if (active && payload && payload.length) {
+                    return (
+                      <div className="rounded-2xl border border-black/5 bg-white/95 p-4 text-[12px] font-black shadow-2xl backdrop-blur-md">
+                        <span style={{ color: payload[0].payload.color }}>{payload[0].name}: {payload[0].value} NODES</span>
+                      </div>
+                    );
+                  }
+                  return null;
+                }}
+              />
             </PieChart>
           </ResponsiveContainer>
         </div>
-      </div>
-      <div className="rounded-xl border border-scan-line bg-white/65 p-3">
-        <p className="mb-2 text-xs font-bold uppercase tracking-widest text-black/35">Ativos por sub-rede</p>
-        <div className="h-32">
+      </motion.div>
+
+      <motion.div 
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="rounded-[2.5rem] border border-scan-line bg-white/40 p-8 shadow-2xl backdrop-blur-xl"
+      >
+        <div className="mb-6 flex items-center justify-between">
+          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-black/40">Network Density Matrix</p>
+          <Activity className="h-4 w-4 text-black/20" />
+        </div>
+        <div className="h-56">
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={subnetData}>
-              <XAxis dataKey="index" hide />
+            <AreaChart data={subnetData} margin={{ top: 20, right: 20, left: 0, bottom: 0 }}>
+              <defs>
+                <linearGradient id="colorAtivos" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#ef4444" stopOpacity={0.4}/>
+                  <stop offset="95%" stopColor="#ef4444" stopOpacity={0}/>
+                </linearGradient>
+              </defs>
+              <XAxis dataKey="label" hide />
               <YAxis hide />
-              <ChartTooltip labelFormatter={(_, payload) => payload?.[0]?.payload?.name || ''} />
-              <Line type="monotone" dataKey="ativos" stroke="#101418" strokeWidth={2.4} dot={{ r: 4, fill: '#ff5f1f', strokeWidth: 0 }} activeDot={{ r: 6 }} />
-            </LineChart>
+              <ChartTooltip 
+                content={({ active, payload }) => {
+                  if (active && payload && payload.length) {
+                    return (
+                      <div className="rounded-2xl border border-black/5 bg-white/95 p-4 text-[12px] font-black shadow-2xl backdrop-blur-md">
+                        <p className="text-black/40 uppercase text-[9px] mb-1 font-black tracking-widest">{payload[0].payload.name}</p>
+                        <p className="text-scan-ink">{payload[0].value} ACTIVE DEVICES</p>
+                      </div>
+                    );
+                  }
+                  return null;
+                }}
+              />
+              <Area 
+                type="monotone" 
+                dataKey="ativos" 
+                stroke="#171717"
+                strokeWidth={4} 
+                fillOpacity={1} 
+                fill="url(#colorAtivos)" 
+                activeDot={{ r: 8, strokeWidth: 0, fill: '#ef4444' }}
+              />
+            </AreaChart>
           </ResponsiveContainer>
         </div>
-      </div>
-      <div className="grid gap-2">
-        <MetricPill label="Acessos sensiveis" value={exposureCount} tone="orange" />
-        <MetricPill label="Web identificado" value={webCount} tone="green" />
-        <MetricPill label="Offline preservado" value={result.devices.filter((device) => device.status === 'offline').length} tone="gray" />
+      </motion.div>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-1">
+        <MetricPill label="Critical Exposures" value={exposureCount} tone="red" icon={ShieldAlert} />
+        {telnetCount > 0 && <MetricPill label="Telnet Legacy" value={telnetCount} tone="red" icon={Terminal} />}
+        <MetricPill label="Public Surface" value={webCount} tone="blue" icon={Globe} />
+        <MetricPill label="Inventory Size" value={result.devices.length} tone="gray" icon={Cpu} />
       </div>
     </div>
   );
 };
 
-const MetricPill = ({ label, value, tone }: { label: string; value: number; tone: 'orange' | 'green' | 'gray' }) => {
-  const toneClass = {
-    orange: 'border-orange-200 bg-orange-50 text-orange-700',
-    green: 'border-green-200 bg-green-50 text-green-700',
-    gray: 'border-black/10 bg-white/65 text-black/55',
+const MetricPill = ({ label, value, tone, icon: Icon }: { label: string; value: number; tone: 'red' | 'blue' | 'gray'; icon: any }) => {
+  const colors = {
+    red: 'border-red-100 bg-red-50/50 text-red-700 ring-red-500/10',
+    blue: 'border-blue-100 bg-blue-50/50 text-blue-700 ring-blue-500/10',
+    gray: 'border-slate-100 bg-slate-50/50 text-slate-600 ring-slate-500/10',
+  }[tone];
+
+  const iconColors = {
+    red: 'text-red-400',
+    blue: 'text-blue-400',
+    gray: 'text-slate-400',
   }[tone];
 
   return (
-    <div className={`flex items-center justify-between rounded-xl border p-3 ${toneClass}`}>
-      <span className="text-xs font-bold uppercase tracking-widest">{label}</span>
-      <span className="font-mono text-xl font-black"><AnimatedNumber value={value} /></span>
-    </div>
+    <motion.div 
+      whileHover={{ scale: 1.02, x: 4 }}
+      className={`flex items-center justify-between rounded-xl border p-4 shadow-sm ring-1 backdrop-blur-md transition-all ${colors}`}
+    >
+      <div className="flex items-center gap-3">
+        <Icon className={`h-4 w-4 ${iconColors}`} />
+        <span className="text-[10px] font-black uppercase tracking-[0.16em]">{label}</span>
+      </div>
+      <span className="font-mono text-2xl font-black">
+        <AnimatedNumber value={value} />
+      </span>
+    </motion.div>
   );
 };
 
@@ -1349,16 +1446,28 @@ const flowNodeTypes = {
   runescan: ({ data }: NodeProps<Node<FlowNodeData>>) => {
     const node = data as FlowNodeData;
     return (
-      <div className={`min-w-36 rounded-xl border bg-white/95 px-3 py-2 shadow-[0_14px_30px_rgba(16,20,24,0.12)] ${flowNodeClass(node)}`}>
-        <Handle type="target" position={Position.Left} className="!h-2 !w-2 !border-0 !bg-black/30" />
-        <Handle type="source" position={Position.Right} className="!h-2 !w-2 !border-0 !bg-black/30" />
-        <div className="flex items-center gap-2">
-          <span className={`h-2.5 w-2.5 rounded-full ${node.kind === 'root' ? 'bg-scan-ink' : node.risk === 'high' ? 'bg-red-500' : node.risk === 'medium' ? 'bg-orange-500' : 'bg-green-500'}`} />
-          <p className="truncate font-mono text-xs font-bold">{node.label}</p>
-          {typeof node.count === 'number' && <span className="ml-auto rounded bg-black/[0.04] px-1.5 py-0.5 font-mono text-[9px] text-black/45">{node.count}</span>}
+      <motion.div 
+        initial={{ scale: 0.9, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        className={`min-w-44 overflow-hidden rounded-2xl border bg-white/95 shadow-2xl backdrop-blur-md transition-all hover:ring-2 hover:ring-scan-accent/20 ${flowNodeClass(node)}`}
+      >
+        <Handle type="target" position={Position.Left} className="!h-2.5 !w-2.5 !border-none !bg-black/20" />
+        <Handle type="source" position={Position.Right} className="!h-2.5 !w-2.5 !border-none !bg-black/20" />
+        
+        <div className={`h-1.5 w-full ${node.kind === 'root' ? 'bg-scan-ink' : node.risk === 'high' ? 'bg-red-500' : node.risk === 'medium' ? 'bg-orange-500' : 'bg-green-500'}`} />
+        
+        <div className="p-3">
+          <div className="flex items-center gap-2">
+            <p className="truncate font-mono text-[11px] font-bold tracking-tight text-scan-ink uppercase">{node.label}</p>
+            {typeof node.count === 'number' && (
+              <span className="ml-auto rounded-full bg-black/5 px-2 py-0.5 font-mono text-[9px] font-bold text-black/40">
+                {node.count}
+              </span>
+            )}
+          </div>
+          <p className="mt-1 truncate font-mono text-[9px] font-medium leading-normal text-black/40">{node.detail}</p>
         </div>
-        <p className="mt-1 truncate font-mono text-[10px] text-black/40">{node.detail}</p>
-      </div>
+      </motion.div>
     );
   },
 };
@@ -1690,136 +1799,157 @@ const DeviceDetails = ({
   const webFingerprints = getWebFingerprints(device);
 
   return (
-    <div className="panel-surface rounded-xl p-6">
-      <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-        <div className="min-w-0">
-          <div className="mb-2 flex flex-wrap items-center gap-2">
-            <span className="rounded bg-scan-ink px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-white">{deviceTypeLabel(device.type)}</span>
-            <span className="rounded border border-scan-line px-2 py-1 text-[10px] uppercase tracking-wider text-black/45">{device.source || 'desconhecido'}</span>
-            <span className={`rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wider ${riskClass(device.riskLevel)}`}>{device.riskLevel || 'sem risco'}</span>
+    <div className="panel-surface overflow-hidden rounded-2xl">
+      <div className="bg-scan-ink/5 p-6 md:p-8">
+        <div className="flex flex-col gap-6 md:flex-row md:items-start md:justify-between">
+          <div className="min-w-0">
+            <div className="mb-4 flex flex-wrap items-center gap-2">
+              <span className="rounded-full bg-scan-ink px-3 py-1 text-[10px] font-black uppercase tracking-widest text-white">{deviceTypeLabel(device.type)}</span>
+              <span className="rounded-full border border-black/10 bg-white/50 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-black/40">{device.source || 'native'}</span>
+              <span className={`rounded-full px-3 py-1 text-[10px] font-black uppercase tracking-widest ${riskClass(device.riskLevel)}`}>Security: {device.riskLevel || 'Safe'}</span>
+            </div>
+            <h2 className="line-clamp-1 text-4xl font-extrabold tracking-tight md:text-5xl">{device.name}</h2>
+            <div className="mt-2 flex items-center gap-3">
+              <p className="font-mono text-base font-bold text-scan-accent">{device.ip}</p>
+              <div className="h-4 w-px bg-black/10" />
+              <p className="text-sm font-medium text-black/40 italic">{device.vlan}</p>
+            </div>
+            
+            {riskReasons.length > 0 && (
+              <div className="mt-5 flex flex-wrap gap-2">
+                {riskReasons.map((reason) => (
+                  <span key={reason} className="flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-100/50 px-3 py-1.5 text-[10px] font-black uppercase tracking-wide text-red-700">
+                    <ShieldAlert className="h-3 w-3" />
+                    {reason}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
-          <h2 className="truncate text-3xl font-semibold">{device.name}</h2>
-          <p className="mt-1 font-mono text-sm text-black/45">{device.ip}</p>
-          {riskReasons.length > 0 && (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {riskReasons.map((reason) => (
-                <span key={reason} className="rounded border border-red-200 bg-red-50 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-red-700">
-                  {reason}
-                </span>
-              ))}
+          
+          <div className={`flex h-12 items-center rounded-2xl border px-6 font-mono text-xs font-black uppercase tracking-widest shadow-sm ${device.status === 'online' ? 'border-green-200 bg-green-500 text-white shadow-green-500/20' : 'border-red-200 bg-red-500 text-white shadow-red-500/20'}`}>
+            <span className="mr-2 h-2 w-2 animate-pulse rounded-full bg-white" />
+            {device.status}
+          </div>
+        </div>
+      </div>
+
+      <div className="p-6 md:p-8">
+        <div className="mb-8 overflow-hidden rounded-xl border border-scan-line bg-white shadow-sm">
+          <div className="flex items-center gap-2 border-b border-scan-line bg-black/[0.02] px-4 py-2">
+            <Zap className="h-3 w-3 text-scan-accent" />
+            <span className="text-[9px] font-black uppercase tracking-widest text-black/35">Ações Rápidas & Conectividade</span>
+          </div>
+          <div className="flex flex-wrap gap-1 p-2">
+            {actions.map((action) => (
+              <button
+                key={`${action.kind}-${action.port}`}
+                onClick={() => openDeviceAction(action.href)}
+                className="group flex h-10 items-center justify-center gap-3 rounded-lg border border-transparent px-4 py-2 text-[10px] font-black uppercase tracking-[0.1em] transition-all hover:bg-scan-ink hover:text-white"
+              >
+                <action.icon className="h-3.5 w-3.5" />
+                {action.label}
+                <ExternalLink className="h-3 w-3 opacity-0 group-hover:opacity-60" />
+              </button>
+            ))}
+            {actions.length === 0 && <p className="px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-black/25">Nenhuma interface de acesso detectada</p>}
+          </div>
+        </div>
+
+        <div className="mb-8 grid gap-1 grid-cols-2 md:grid-cols-3 lg:grid-cols-5">
+          <button
+            onClick={() => onRunDiagnostic('dns')}
+            disabled={diagnosticLoading !== null}
+            className="flex flex-col items-center justify-center gap-2 rounded-xl border border-scan-line bg-white p-4 transition-all hover:border-scan-accent hover:shadow-lg disabled:opacity-40"
+          >
+            <Search className="h-5 w-5 text-black/40" />
+            <span className="text-[9px] font-black uppercase tracking-widest">{diagnosticLoading === 'dns' ? 'Consultando...' : 'DNS/Nome'}</span>
+          </button>
+          <button
+            onClick={() => onRunDiagnostic('ping')}
+            disabled={diagnosticLoading !== null}
+            className="flex flex-col items-center justify-center gap-2 rounded-xl border border-scan-line bg-white p-4 transition-all hover:border-scan-accent hover:shadow-lg disabled:opacity-40"
+          >
+            <Activity className="h-5 w-5 text-black/40" />
+            <span className="text-[9px] font-black uppercase tracking-widest">{diagnosticLoading === 'ping' ? 'Pingando...' : 'Ping/TCP'}</span>
+          </button>
+          <button
+            onClick={() => onRunDiagnostic('windows')}
+            disabled={diagnosticLoading !== null}
+            className="flex flex-col items-center justify-center gap-2 rounded-xl border border-scan-line bg-white p-4 transition-all hover:border-scan-accent hover:shadow-lg disabled:opacity-40"
+          >
+            <Monitor className="h-5 w-5 text-black/40" />
+            <span className="text-[9px] font-black uppercase tracking-widest">{diagnosticLoading === 'windows' ? 'Analizando...' : 'Windows Diag'}</span>
+          </button>
+          {hasWebSurface && (
+            <button
+              onClick={() => onRunDiagnostic('web')}
+              disabled={diagnosticLoading !== null}
+              className="flex flex-col items-center justify-center gap-2 rounded-xl border border-scan-line bg-white p-4 transition-all hover:border-scan-accent hover:shadow-lg disabled:opacity-40"
+            >
+              <Globe className="h-5 w-5 text-black/40" />
+              <span className="text-[9px] font-black uppercase tracking-widest">{diagnosticLoading === 'web' ? 'Auditando...' : 'Web Finger'}</span>
+            </button>
+          )}
+          <button
+            onClick={() => onRunDiagnostic('passive')}
+            disabled={diagnosticLoading !== null}
+            className="flex flex-col items-center justify-center gap-2 rounded-xl border border-scan-line bg-white p-4 transition-all hover:border-scan-accent hover:shadow-lg disabled:opacity-40"
+          >
+            <Radar className="h-5 w-5 text-black/40" />
+            <span className="text-[9px] font-black uppercase tracking-widest">{diagnosticLoading === 'passive' ? 'Capturando...' : 'Passivo'}</span>
+          </button>
+        </div>
+
+        <div className="grid gap-8">
+          {webFingerprints.length > 0 && (
+            <div className="rounded-2xl bg-blue-500/5 p-6 ring-1 ring-blue-500/20">
+              <div className="mb-4 flex items-center gap-2">
+                <Globe className="h-4 w-4 text-blue-600" />
+                <span className="text-[10px] font-black uppercase tracking-[0.15em] text-blue-700">Digital Assets Identified</span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {webFingerprints.map((item) => (
+                  <span key={item} className="rounded-xl border border-blue-200 bg-white px-4 py-2 font-mono text-xs font-bold text-blue-900 shadow-sm">
+                    {item}
+                  </span>
+                ))}
+              </div>
             </div>
           )}
-        </div>
-        <div className={`rounded-full border px-4 py-2 font-mono text-[10px] font-bold uppercase ${device.status === 'online' ? 'border-green-200 bg-green-50 text-green-700' : 'border-red-200 bg-red-50 text-red-700'}`}>
-          {device.status}
-        </div>
-      </div>
 
-      {actions.length > 0 && (
-        <div className="mb-3 flex flex-wrap gap-2">
-          {actions.map((action) => (
-            <button
-              key={`${action.kind}-${action.port}`}
-              onClick={() => openDeviceAction(action.href)}
-              title={action.hint}
-              className="flex h-9 items-center gap-2 rounded-md border border-scan-line bg-white px-3 text-xs font-bold uppercase tracking-wider text-scan-ink transition hover:border-scan-accent hover:bg-scan-accent hover:text-white"
-            >
-              <action.icon className="h-4 w-4" />
-              {action.label}
-              <ExternalLink className="h-3.5 w-3.5 opacity-60" />
-            </button>
-          ))}
-        </div>
-      )}
-
-      <div className="mb-6 flex flex-wrap gap-2">
-        <button
-          type="button"
-          onClick={() => onRunDiagnostic('dns')}
-          disabled={diagnosticLoading !== null}
-          className="flex h-9 items-center gap-2 rounded-md border border-scan-line bg-white px-3 text-xs font-bold uppercase tracking-wider text-scan-ink transition hover:border-green-200 hover:bg-green-50 disabled:cursor-not-allowed disabled:opacity-50"
-          title="Consultar nome, PTR, servidores DNS e ARP local"
-        >
-          <Search className="h-4 w-4" />
-          {diagnosticLoading === 'dns' ? 'Nome...' : 'Nome/DNS'}
-        </button>
-        <button
-          type="button"
-          onClick={() => onRunDiagnostic('ping')}
-          disabled={diagnosticLoading !== null}
-          className="flex h-9 items-center gap-2 rounded-md border border-scan-line bg-white px-3 text-xs font-bold uppercase tracking-wider text-scan-ink transition hover:border-green-200 hover:bg-green-50 disabled:cursor-not-allowed disabled:opacity-50"
-          title="Testar ICMP e portas TCP detectadas"
-        >
-          <Activity className="h-4 w-4" />
-          {diagnosticLoading === 'ping' ? 'Testando...' : 'Ping/TCP'}
-        </button>
-        <button
-          type="button"
-          onClick={() => onRunDiagnostic('windows')}
-          disabled={diagnosticLoading !== null}
-          className="flex h-9 items-center gap-2 rounded-md border border-scan-line bg-white px-3 text-xs font-bold uppercase tracking-wider text-scan-ink transition hover:border-green-200 hover:bg-green-50 disabled:cursor-not-allowed disabled:opacity-50"
-          title="Consultar ARP, NetBIOS, rota curta e portas via Windows local"
-        >
-          <Monitor className="h-4 w-4" />
-          {diagnosticLoading === 'windows' ? 'Windows...' : 'Windows'}
-        </button>
-        {hasWebSurface && (
-          <button
-            type="button"
-            onClick={() => onRunDiagnostic('web')}
-            disabled={diagnosticLoading !== null}
-            className="flex h-9 items-center gap-2 rounded-md border border-scan-line bg-white px-3 text-xs font-bold uppercase tracking-wider text-scan-ink transition hover:border-green-200 hover:bg-green-50 disabled:cursor-not-allowed disabled:opacity-50"
-            title="Ler title, headers, redirects e certificado sem login nem clique na interface"
-          >
-            <Globe className="h-4 w-4" />
-            {diagnosticLoading === 'web' ? 'Lendo...' : 'Identificar Web'}
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={() => onRunDiagnostic('passive')}
-          disabled={diagnosticLoading !== null}
-          className="flex h-9 items-center gap-2 rounded-md border border-scan-line bg-white px-3 text-xs font-bold uppercase tracking-wider text-scan-ink transition hover:border-green-200 hover:bg-green-50 disabled:cursor-not-allowed disabled:opacity-50"
-          title="Capturar por alguns segundos ARP/DNS/LLDP/CDP/host com TShark"
-        >
-          <Radar className="h-4 w-4" />
-          {diagnosticLoading === 'passive' ? 'Capturando...' : 'Passiva'}
-        </button>
-      </div>
-
-      <div className="grid gap-5">
-        {webFingerprints.length > 0 && (
-          <div className="rounded-lg border border-green-200 bg-green-50 p-4">
-            <div className="mb-3 flex items-center gap-2">
-              <Globe className="h-4 w-4 text-green-700" />
-              <span className="text-[10px] font-bold uppercase tracking-widest text-green-700">Web identificado</span>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {webFingerprints.map((item) => (
-                <span key={item} className="rounded-md border border-green-200 bg-white px-2 py-1.5 font-mono text-xs leading-5 text-green-900">
-                  {item}
-                </span>
-              ))}
-            </div>
+          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
+            <DetailItem label="Address MAC" value={formatValue(device.mac)} />
+            <DetailItem label="Vendor" value={formatValue(device.vendor, 'Generic/Unknown')} />
+            <DetailItem label="Network Segment" value={device.vlan} />
+            <DetailItem label="Subnet Mask" value={formatValue(device.subnet)} />
+            <DetailItem label="Latency / Jitter" value={device.latencyMs ? `${device.latencyMs} ms` : 'Not Measured'} />
+            <DetailItem label="Discovery Source" value={device.source || 'native'} />
+            <DetailItem label="OS Intelligence" value={device.os || 'Undetected'} />
+            <DetailItem label="Topology Link" value={device.parentId || 'Inbound'} />
           </div>
-        )}
-        <div className="grid grid-cols-2 gap-5 md:grid-cols-4">
-          <DetailItem label="MAC" value={formatValue(device.mac)} />
-          <DetailItem label="Fabricante" value={formatValue(device.vendor, 'Nao identificado')} />
-          <DetailItem label="VLAN/Sub-rede" value={device.vlan} />
-          <DetailItem label="Subnet" value={formatValue(device.subnet)} />
-          <DetailItem label="Portas" value={device.openPorts?.join(', ') || 'Nenhuma'} />
-          <DetailItem label="Latencia" value={device.latencyMs ? `${device.latencyMs} ms` : 'Nao medido'} />
-          <DetailItem label="Confianca" value={device.confidence || 'low'} />
-          <DetailItem label="Conectado a" value={device.parentId || 'Raiz'} />
+
+          <div className="h-px bg-scan-line" />
+
+          <div className="grid gap-8 lg:grid-cols-2">
+            <DetailList
+              label="Open Service Ports"
+              empty="No services identified"
+              items={(device.services || []).map((service) => `${service.port}/${service.protocol.toUpperCase()} → ${service.service || 'unknown'}${service.product ? ` [${service.product}]` : ''}`)}
+            />
+            <DetailList label="Evidence Log" empty="No additional markers" items={device.evidence || []} />
+          </div>
+
+          {diagnostic && (
+            <motion.div 
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mt-4"
+            >
+              <DiagnosticPanel result={diagnostic} />
+            </motion.div>
+          )}
         </div>
-        <DetailList
-          label="Servicos detectados"
-          empty="Nenhum servico identificado"
-          items={(device.services || []).map((service) => `${service.port}/${service.protocol} ${service.service || 'servico'}${service.product ? ` - ${service.product}` : ''}`)}
-        />
-        <DetailList label="Evidencias" empty="Sem evidencias detalhadas" items={device.evidence || []} />
-        {diagnostic && <DiagnosticPanel result={diagnostic} />}
       </div>
     </div>
   );

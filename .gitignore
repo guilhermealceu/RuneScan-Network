@@ -6,11 +6,3 @@ coverage/
 *.log
 .env*
 !.env.example
-*.cfg
-*.chm
-*.exe
-*.zip
-scan-*.json
-runescan-report-*.json
-readme.txt
-tools/nirsoft/

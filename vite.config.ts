@@ -14,16 +14,18 @@ export default defineConfig(() => {
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
-      hmr: process.env.DISABLE_HMR !== 'true',
-      // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
+      hmr: process.env.DISABLE_HMR !== 'true' ? { port: 24679 } : false,
       watch: process.env.DISABLE_HMR === 'true' ? null : {
         ignored: [
+          '**/temp/**', 
+          '**/scan_result.xml', 
+          '**/scan_nmap.xml', 
           '**/WNetWatcher.cfg',
-          '**/WNetWatcher*.cfg',
-          '**/wnetwatcher-*.csv',
-          '**/scan-*.json',
-          '**/*.log',
-        ],
+          '**/metadata.json',
+          '**/package.json',
+          '**/package-lock.json',
+          '**/tsconfig.json'
+        ]
       },
     },
   };

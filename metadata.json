@@ -1,6 +1,6 @@
 {
   "name": "RuneScan Network",
-  "description": "Console local para descoberta de rede, inventario de ativos, topologia inferida, fingerprint de servicos e identificacao web em auditorias autorizadas.",
+  "description": "Enterprise-grade network discovery, visibility, and security auditing suite.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

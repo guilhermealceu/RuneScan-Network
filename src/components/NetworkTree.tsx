@@ -214,19 +214,61 @@ function exportHtmlReport(result: ScanResult | null, devices: Device[]) {
   const timestamp = new Date().toISOString();
   const online = devices.filter((device) => device.status === 'online');
   const highRisk = online.filter((device) => device.riskLevel === 'high');
-  const sensitive = online.filter((device) => [23, 135, 139, 445, 3389].some((port) => device.openPorts?.includes(port)));
-  const web = online.filter((device) => device.evidence?.some((item) => item.toLowerCase().startsWith('web fingerprint:')));
+  const mediumRisk = online.filter((device) => device.riskLevel === 'medium');
+  const telnetCount = online.filter((device) => device.openPorts?.includes(23)).length;
+  const sensitive = online.filter((device) => [21, 23, 135, 139, 445, 3389, 5900].some((port) => device.openPorts?.includes(port)));
+  const web = online.filter((device) => device.evidence?.some((item) => item.toLowerCase().includes('web') || item.toLowerCase().includes('http')));
+  
+  const poolsHtml = (result?.vlans || [])
+    .filter(v => v.onlineCount > 0)
+    .map(v => `
+      <div class="pool-row">
+        <span>${escapeHtml(v.subnet)}</span>
+        <strong>${v.onlineCount} ativos</strong>
+      </div>
+    `).join('');
+
   const rows = devices
     .sort((a, b) => riskOrder(b) - riskOrder(a) || ipToNumber(a.ip) - ipToNumber(b.ip))
     .map((device) => `
-      <tr>
-        <td><strong>${escapeHtml(device.name)}</strong><br><span>${escapeHtml(device.ip)}</span></td>
-        <td>${escapeHtml(device.type)}</td>
-        <td><span class="risk ${device.riskLevel || 'low'}">${escapeHtml(device.riskLevel || 'low')}</span></td>
-        <td>${escapeHtml(device.openPorts?.join(', ') || '-')}</td>
-        <td>${escapeHtml((device.services || []).map((service) => `${service.port}/${service.protocol} ${service.service || ''} ${service.product || ''}`).join(' | ') || '-')}</td>
-        <td>${escapeHtml((device.evidence || []).slice(0, 4).join(' | ') || '-')}</td>
-      </tr>
+      <div class="device-card ${device.riskLevel || 'low'}">
+        <div class="device-header">
+          <div class="device-info">
+            <div class="device-name">${escapeHtml(device.name)}</div>
+            <div class="device-ip">${escapeHtml(device.ip)} <span class="vlan">/ ${escapeHtml(device.vlan)}</span></div>
+          </div>
+          <div class="badge-group">
+            <span class="badge ${device.status}">${device.status === 'online' ? '● ONLINE' : '○ OFFLINE'}</span>
+            <span class="badge risk-${device.riskLevel || 'low'}">RISCO ${escapeHtml(device.riskLevel || 'low').toUpperCase()}</span>
+          </div>
+        </div>
+        
+        <div class="device-grid">
+          <div class="grid-item">
+            <div class="grid-label">Tipo & Identidade</div>
+            <div class="grid-value">${escapeHtml(device.type)} <small>${escapeHtml(device.vendor || 'Generic')} • ${escapeHtml(device.mac || 'No MAC')}</small></div>
+          </div>
+          <div class="grid-item">
+            <div class="grid-label">Portas Abertas</div>
+            <div class="grid-value font-mono">${escapeHtml(device.openPorts?.join(', ') || 'Nenhuma')}</div>
+          </div>
+        </div>
+
+        ${device.services?.length ? `
+        <div class="services-track">
+          ${device.services.map(s => `
+            <div class="service-pill">
+              <strong>${s.port}/${s.protocol}</strong>
+              <span>${escapeHtml(s.service || '')} ${escapeHtml(s.product || '')}</span>
+            </div>
+          `).join('')}
+        </div>` : ''}
+
+        <div class="evidence-box">
+          <div class="grid-label">Evidências Detetadas</div>
+          <div class="evidence-text">${escapeHtml(device.evidence?.join(' • ') || 'Descoberta Nativa')}</div>
+        </div>
+      </div>
     `).join('');
 
   const html = `<!doctype html>
@@ -234,49 +276,184 @@ function exportHtmlReport(result: ScanResult | null, devices: Device[]) {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>RuneScan Network Report</title>
+  <title>RuneScan | Relatório Executivo - ${escapeHtml(result?.target || 'Rede')}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <style>
-    body { margin: 0; font-family: Inter, Arial, sans-serif; color: #101418; background: #eef2f4; }
-    .page { max-width: 1180px; margin: 0 auto; padding: 32px; }
-    header { background: #fff; border: 1px solid #d9dde0; border-radius: 18px; padding: 26px; box-shadow: 0 18px 42px rgba(16,20,24,.08); }
-    h1 { margin: 0; font-size: 34px; }
-    .muted { color: #667078; font-size: 13px; }
-    .grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin: 18px 0; }
-    .card { background: #fff; border: 1px solid #d9dde0; border-radius: 14px; padding: 14px; }
-    .label { color: #899198; text-transform: uppercase; letter-spacing: .12em; font-size: 10px; font-weight: 800; }
-    .value { margin-top: 8px; font-family: "Source Code Pro", Consolas, monospace; font-size: 24px; font-weight: 900; }
-    table { width: 100%; border-collapse: separate; border-spacing: 0; background: #fff; border: 1px solid #d9dde0; border-radius: 16px; overflow: hidden; }
-    th, td { padding: 12px; border-bottom: 1px solid #edf0f2; text-align: left; vertical-align: top; font-size: 12px; }
-    th { background: #f7f9fa; color: #6d757c; text-transform: uppercase; letter-spacing: .1em; font-size: 10px; }
-    tr:last-child td { border-bottom: 0; }
-    td span { color: #7b838a; font-family: "Source Code Pro", Consolas, monospace; font-size: 11px; }
-    .risk { display: inline-block; border-radius: 999px; padding: 4px 8px; font-weight: 800; text-transform: uppercase; font-size: 10px; }
-    .risk.high { background: #fee2e2; color: #b91c1c; }
-    .risk.medium { background: #ffedd5; color: #c2410c; }
-    .risk.low { background: #dcfce7; color: #15803d; }
+    :root {
+      --bg: #f5f7f9;
+      --surface: #ffffff;
+      --border: #e2e8f0;
+      --ink: #0f172a;
+      --ink-muted: #64748b;
+      --accent: #ff5f1f;
+      --red: #ef4444;
+      --orange: #f59e0b;
+      --green: #10b981;
+      --blue: #3b82f6;
+    }
+    
+    * { box-sizing: border-box; }
+    body { 
+      margin: 0; 
+      font-family: 'Inter', system-ui, sans-serif; 
+      color: var(--ink); 
+      background: var(--bg); 
+      line-height: 1.5;
+      padding-bottom: 80px;
+    }
+    
+    .page { max-width: 1000px; margin: 0 auto; padding: 40px 20px; }
+    
+    .report-header {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      padding: 45px;
+      margin-bottom: 32px;
+      box-shadow: 0 4px 20px -2px rgba(0,0,0,0.05);
+    }
+    
+    .brand-section { display: flex; justify-content: space-between; align-items: center; margin-bottom: 40px; border-bottom: 1px solid var(--border); padding-bottom: 25px; }
+    .brand h1 { margin: 0; font-size: 38px; font-weight: 900; letter-spacing: -0.05em; color: var(--accent); }
+    .brand p { margin: 4px 0 0; color: var(--ink-muted); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.15em; }
+    .timestamp { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--ink-muted); text-align: right; }
+    
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 15px; margin-bottom: 35px; }
+    .stat-card { background: #f8fafc; border: 1px solid var(--border); border-radius: 18px; padding: 22px; text-align: center; }
+    .stat-label { font-size: 9px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.12em; color: var(--ink-muted); margin-bottom: 8px; }
+    .stat-value { font-size: 30px; font-weight: 900; font-family: 'JetBrains Mono', monospace; }
+    
+    .alert-box { 
+      background: #fef2f2; 
+      border: 1px solid #fee2e2; 
+      border-radius: 20px; 
+      padding: 25px; 
+      margin-bottom: 30px;
+    }
+    .alert-title { font-size: 12px; font-weight: 900; color: var(--red); margin-bottom: 15px; text-transform: uppercase; letter-spacing: 0.1em; display: flex; align-items: center; gap: 8px; }
+    .alert-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .alert-item { display: flex; flex-direction: column; }
+    .alert-val { font-size: 26px; font-weight: 900; color: var(--ink); }
+    .alert-lab { font-size: 11px; font-weight: 600; color: var(--ink-muted); }
+
+    .pools-box { background: #f0f9ff; border: 1px solid #e0f2fe; border-radius: 20px; padding: 25px; margin-bottom: 30px; }
+    .pool-title { font-size: 12px; font-weight: 900; color: var(--blue); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.1em; }
+    .pool-list { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .pool-row { display: flex; justify-content: space-between; padding: 8px 15px; background: white; border-radius: 10px; font-size: 11px; border: 1px solid #e0f2fe; }
+    .pool-row strong { color: var(--blue); }
+
+    .inventory-title { font-size: 20px; font-weight: 900; margin: 50px 0 25px; letter-spacing: -0.02em; padding-left: 12px; border-left: 4px solid var(--accent); }
+    
+    .device-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      padding: 28px;
+      margin-bottom: 20px;
+      position: relative;
+    }
+    .device-card.high { border-left: 6px solid var(--red); }
+    .device-card.medium { border-left: 6px solid var(--orange); }
+    .device-card.low { border-left: 6px solid var(--green); }
+    
+    .device-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 22px; }
+    .device-name { font-size: 19px; font-weight: 800; letter-spacing: -0.03em; }
+    .device-ip { font-family: 'JetBrains Mono', monospace; font-size: 14px; color: var(--accent); font-weight: 700; margin-top: 2px; }
+    .vlan { font-weight: 500; opacity: 0.6; font-size: 0.9em; margin-left: 5px; }
+    
+    .badge { padding: 4px 12px; border-radius: 8px; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; }
+    .badge.risk-high { background: #fef2f2; color: var(--red); }
+    .badge.risk-medium { background: #fff7ed; color: var(--orange); }
+    .badge.risk-low { background: #f0fdf4; color: var(--green); }
+    
+    .device-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; margin-bottom: 20px; }
+    .grid-label { font-size: 9px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.12em; color: var(--ink-muted); margin-bottom: 5px; }
+    .grid-value { font-size: 14px; font-weight: 700; color: var(--ink); }
+    .font-mono { font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+    small { display: block; font-weight: 500; font-size: 11px; color: var(--ink-muted); margin-top: 2px; }
+
+    .services-track { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+    .service-pill { background: #f1f5f9; border-radius: 10px; padding: 8px 12px; font-size: 12px; border: 1px solid #e2e8f0; }
+    .service-pill strong { color: var(--ink); margin-right: 6px; }
+
+    .evidence-box { background: #f8fafc; border-radius: 14px; padding: 15px 20px; border: 1px dashed var(--border); }
+    .evidence-text { font-size: 11px; color: var(--ink-muted); line-height: 1.6; }
+
+    footer { text-align: center; margin-top: 80px; font-size: 11px; color: var(--ink-muted); font-weight: 700; text-transform: uppercase; letter-spacing: 0.2em; }
+    
+    @media print {
+      body { background: white; padding: 0; }
+      .page { padding: 0; max-width: 100%; }
+      .device-card { break-inside: avoid; border: 1px solid #eee !important; box-shadow: none !important; }
+      .report-header { box-shadow: none !important; }
+    }
   </style>
 </head>
 <body>
-  <main class="page">
-    <header>
-      <h1>RuneScan Network Report</h1>
-      <p class="muted">Gerado em ${escapeHtml(new Date(timestamp).toLocaleString())}${result ? ` / alvo ${escapeHtml(result.target)}` : ''}</p>
-      <div class="grid">
-        <div class="card"><div class="label">Ativos</div><div class="value">${devices.length}</div></div>
-        <div class="card"><div class="label">Online</div><div class="value">${online.length}</div></div>
-        <div class="card"><div class="label">Risco alto</div><div class="value">${highRisk.length}</div></div>
-        <div class="card"><div class="label">Sensíveis</div><div class="value">${sensitive.length}</div></div>
-        <div class="card"><div class="label">Web ID</div><div class="value">${web.length}</div></div>
+  <div class="page">
+    <div class="report-header">
+      <div class="brand-section">
+        <div class="brand">
+          <h1>RUNESCAN</h1>
+          <p>Security & Intelligence Network Report</p>
+        </div>
+        <div class="timestamp">
+          DATA: ${escapeHtml(new Date(timestamp).toLocaleDateString('pt-BR'))}<br>
+          HORA: ${escapeHtml(new Date(timestamp).toLocaleTimeString('pt-BR'))}<br>
+          ALVO: ${escapeHtml(result?.target || 'Rede Local')}
+        </div>
       </div>
-      <p class="muted">Topologia e VLANs sao inferidas quando nao houver SNMP/SSH/LLDP/CDP confirmando camada fisica.</p>
-    </header>
-    <section style="margin-top:18px">
-      <table>
-        <thead><tr><th>Host</th><th>Tipo</th><th>Risco</th><th>Portas</th><th>Serviços</th><th>Evidências</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </section>
-  </main>
+      
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">Descobertos</div>
+          <div class="stat-value">${devices.length}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Online</div>
+          <div class="stat-value" style="color:var(--green)">${online.length}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Risco Crítico</div>
+          <div class="stat-value" style="color:var(--red)">${highRisk.length}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Web Surface</div>
+          <div class="stat-value">${web.length}</div>
+        </div>
+      </div>
+
+      <div class="alert-box">
+        <div class="alert-title">🚨 Auditoria de Exposição Crítica</div>
+        <div class="alert-grid">
+          <div class="alert-item">
+            <span class="alert-val">${telnetCount}</span>
+            <span class="alert-lab">Instâncias Telnet (Legado/Vulnerável)</span>
+          </div>
+          <div class="alert-item">
+            <span class="alert-val">${sensitive.length}</span>
+            <span class="alert-lab">Acessos Sensíveis (RDP, SMB, SSH, VNC)</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="pools-box">
+        <div class="pool-title">📡 Distribuição por Pools / Subnets</div>
+        <div class="pool-list">
+          ${poolsHtml || 'Nenhum pool identificado.'}
+        </div>
+      </div>
+    </div>
+
+    <h2 class="inventory-title">Inventário Detalhado de Ativos</h2>
+    ${rows}
+
+    <footer>
+      RuneScan Network Intelligence • pilgrims.dev • &copy; ${new Date().getFullYear()}
+    </footer>
+  </div>
 </body>
 </html>`;
 

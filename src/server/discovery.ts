@@ -1108,7 +1108,7 @@ function httpRequest(urlText: string): Promise<{ status?: number; headers: Recor
       timeout: WEB_FINGERPRINT_TIMEOUT_MS,
       headers: {
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.3",
-        "User-Agent": "NetScanExplorer/1.0 web-fingerprint",
+        "User-Agent": "RuneScanNetwork/1.0 web-fingerprint",
       },
     }, (response) => {
       const chunks: Buffer[] = [];
