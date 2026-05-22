@@ -1,0 +1,8 @@
+{
+  "name": "NetScan Explorer",
+  "description": "Sistema avançado de varredura e mapeamento de rede com visualização em árvore, identificação de dispositivos e suporte a VLANs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
