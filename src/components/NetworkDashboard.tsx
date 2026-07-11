@@ -317,7 +317,7 @@ export const NetworkDashboard: React.FC = () => {
   }, []);
 
   return (
-    <div className="runescan-dashboard mx-auto flex w-full max-w-[1800px] flex-col gap-8 p-4 md:p-8 lg:p-12">
+    <div className="runescan-dashboard mx-auto flex w-full flex-col gap-8 p-4 md:p-8 lg:p-12">
       <motion.header
         layout
         transition={{ layout: { duration: 0.28, ease: 'easeOut' } }}
@@ -522,15 +522,15 @@ export const NetworkDashboard: React.FC = () => {
         />
       )}
 
-      <section className="grid grid-cols-1 gap-8 lg:grid-cols-12">
-        <div className="lg:col-span-4 xl:col-span-3">
+      <section className="grid grid-cols-1 gap-6 lg:gap-8 lg:grid-cols-[350px_1fr] xl:grid-cols-[400px_1fr] 2xl:grid-cols-[450px_1fr]">
+        <div>
           <div className="sticky top-10 flex flex-col gap-6">
             <NetworkTree result={scanResult} devices={scanResult?.devices || []} onSelectDevice={selectDevice} />
             <SegmentPanel result={scanResult} />
           </div>
         </div>
 
-        <div ref={detailsRef} className="lg:col-span-8 xl:col-span-9">
+        <div ref={detailsRef} className="min-w-0">
           <AnimatePresence mode="wait">
             {!selectedDevice ? (
               <motion.div

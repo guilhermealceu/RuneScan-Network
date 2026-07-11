@@ -1079,7 +1079,7 @@ async function probeWeb(url: string, redirects: string[] = []): Promise<WebProbe
       redirects,
       title: extractTitle(response.body),
       sample: bodyText.slice(0, 220),
-      bodyText,
+      bodyText: response.body.slice(0, 6000),
       certificate: response.certificate,
     };
   } catch (error) {
@@ -1211,6 +1211,7 @@ function fingerprintWeb(result: WebProbeResult) {
   ].join(" ").toLowerCase();
 
   const rules: Array<{ product: string; type: string; confidence: string; needles: string[] }> = [
+    { product: "Cisco Device", type: "switch", confidence: "alta", needles: ["cisco switch", "cisco router", "cisco systems", "cisco web", "cisco ios", "cisco"] },
     { product: "FortiGate/Fortinet", type: "router/firewall", confidence: "alta", needles: ["fortigate", "fortinet", "fortiguard", "fortitoken"] },
     { product: "Aruba/Instant On", type: "wifi/ap", confidence: "alta", needles: ["aruba", "instant on", "airwave", "virtual controller"] },
     { product: "UniFi/Ubiquiti", type: "wifi/ap", confidence: "alta", needles: ["unifi", "ubiquiti"] },
@@ -1588,6 +1589,7 @@ function mergeProduct(current: string, next: string) {
 function strongerType(current: Device["type"], rows: Record<string, string>[]): Device["type"] {
   const text = rows.map((row) => `${row.Produto} ${row.Tipo}`).join(" ").toLowerCase();
   if (hasAny(text, ["fortigate", "fortinet", "pfsense", "mikrotik", "router/firewall"])) return "router";
+  if (hasAny(text, ["cisco", "switch"])) return "switch";
   if (hasAny(text, ["aruba", "unifi", "ubiquiti", "wifi/ap"])) return "ap";
   if (hasAny(text, ["ricoh", "printer"])) return "printer";
   if (hasAny(text, ["hikvision", "dahua", "axis", "camera"])) return "camera";
