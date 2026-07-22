@@ -74,7 +74,7 @@ export interface CollectorRun {
 export interface ToolCapability {
   id: string;
   name: string;
-  category: 'native' | 'active-scan' | 'passive-capture' | 'windows-utility' | 'planned';
+  category: 'native' | 'active-scan' | 'passive-capture' | 'windows-utility' | 'ai' | 'planned';
   available: boolean;
   command?: string;
   version?: string;

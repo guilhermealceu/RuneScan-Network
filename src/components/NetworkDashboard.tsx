@@ -1,6 +1,18 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence, animate, useMotionValue, useTransform } from 'motion/react';
-import { ReactFlow, Background, Controls, Handle, Position, type Edge, type Node, type NodeProps } from '@xyflow/react';
+import {
+  ReactFlow,
+  Background,
+  Controls,
+  Handle,
+  Position,
+  getNodesBounds,
+  getViewportForBounds,
+  type Edge,
+  type Node,
+  type NodeProps,
+  type ReactFlowInstance,
+} from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { CollectorRun, Device, LocalNetworkContext, ScanResult, ToolCapability } from '../types';
 import { NetworkTree } from './NetworkTree';
@@ -10,9 +22,12 @@ import {
   ChevronDown,
   CheckCircle2,
   ChartNoAxesCombined,
+  ClipboardCopy,
   Cpu,
   ExternalLink,
+  FileImage,
   FileSearch,
+  FileText,
   Globe,
   Info,
   KeyRound,
@@ -75,8 +90,8 @@ export const NetworkDashboard: React.FC = () => {
   const [analyzing, setAnalyzing] = useState(false);
   const [target, setTarget] = useState('192.168.1.0/24');
   const [useNmap, setUseNmap] = useState(true);
-  const [useNirsoft, setUseNirsoft] = useState(false);
-  const [useWebFingerprint, setUseWebFingerprint] = useState(false);
+  const [useNirsoft, setUseNirsoft] = useState(true);
+  const [useWebFingerprint, setUseWebFingerprint] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [progress, setProgress] = useState<ScanProgressEvent[]>([]);
@@ -85,6 +100,7 @@ export const NetworkDashboard: React.FC = () => {
   const [collectorsOpen, setCollectorsOpen] = useState(false);
   const [headerCompact, setHeaderCompact] = useState(false);
   const [insightsVisible, setInsightsVisible] = useState(false);
+  const [availableIpsOpen, setAvailableIpsOpen] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
   const detailsRef = useRef<HTMLDivElement | null>(null);
   const previousScanRef = useRef<ScanResult | null>(null);
@@ -108,6 +124,7 @@ export const NetworkDashboard: React.FC = () => {
 
   const performScan = async () => {
     enterWorkMode();
+    setAvailableIpsOpen(false);
     eventSourceRef.current?.close();
     previousScanRef.current = scanResult;
     setLoading(true);
@@ -175,6 +192,7 @@ export const NetworkDashboard: React.FC = () => {
     setAiAnalysis(null);
     setDiagnostic(null);
     setPoolDiscovery(null);
+    setAvailableIpsOpen(false);
     setProgress([]);
     setCurrentStage('aguardando');
     setError(null);
@@ -231,6 +249,8 @@ export const NetworkDashboard: React.FC = () => {
   };
 
   const analyzeNetworkWithAI = async () => {
+    if (networkAnalyzing) return;
+
     if (!scanResult) {
       setNetworkAnalysis('Execute uma varredura antes de gerar o parecer geral.');
       setNetworkAnalysisOpen(true);
@@ -441,6 +461,20 @@ export const NetworkDashboard: React.FC = () => {
                   <LayoutGrid className={`h-4 w-4 ${poolLoading ? 'animate-pulse' : ''}`} />
                 </button>
                 <button
+                  type="button"
+                  onClick={() => {
+                    enterWorkMode();
+                    setAvailableIpsOpen((value) => !value);
+                  }}
+                  disabled={!scanResult || loading}
+                  aria-pressed={availableIpsOpen}
+                  aria-label="Mostrar IPs candidatos a livres"
+                  className={`flex h-10 w-10 items-center justify-center rounded-md border transition disabled:cursor-not-allowed disabled:opacity-30 ${availableIpsOpen ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-scan-line bg-white text-scan-ink hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700'}`}
+                  title="Listar enderecos que nao apareceram no inventario atual"
+                >
+                  <FileSearch className="h-4 w-4" />
+                </button>
+                <button
                   onClick={clearInventory}
                   aria-label="Limpar inventario"
                   className="flex h-10 w-10 items-center justify-center rounded-md border border-scan-line bg-white text-scan-ink transition hover:border-red-200 hover:bg-red-50 hover:text-red-700"
@@ -512,6 +546,8 @@ export const NetworkDashboard: React.FC = () => {
         />
       )}
 
+      {scanResult && availableIpsOpen && <AvailableIpsPanel result={scanResult} />}
+
       {scanResult && insightsVisible && (
         <ExecutiveInsights
           result={scanResult}
@@ -568,6 +604,7 @@ export const NetworkDashboard: React.FC = () => {
                 />
                 <AiPanel
                   analyzing={analyzing}
+                  networkAnalyzing={networkAnalyzing}
                   analysis={aiAnalysis}
                   onGenerate={() => analyzeWithAI(selectedDevice)}
                   onGenerateNetwork={analyzeNetworkWithAI}
@@ -1249,10 +1286,119 @@ const PoolDiscoveryPanel = ({ result, onScanPool }: { result: DiagnosticResult; 
   </div>
 );
 
+interface AvailableIpGroup {
+  subnet: string;
+  ips: string[];
+  occupied: number;
+}
+
+const AvailableIpsPanel = ({ result }: { result: ScanResult }) => {
+  const groups = useMemo(() => buildAvailableIpGroups(result), [result]);
+  const [copiedSubnet, setCopiedSubnet] = useState<string | null>(null);
+  const candidateCount = groups.reduce((total, group) => total + group.ips.length, 0);
+
+  const copyGroup = async (group: AvailableIpGroup) => {
+    try {
+      await navigator.clipboard.writeText(group.ips.join('\n'));
+      setCopiedSubnet(group.subnet);
+      window.setTimeout(() => setCopiedSubnet((current) => current === group.subnet ? null : current), 1600);
+    } catch {
+      setCopiedSubnet(null);
+    }
+  };
+
+  return (
+    <section className="panel-surface overflow-hidden rounded-xl" aria-labelledby="available-ips-title">
+      <div className="flex flex-col gap-3 border-b border-scan-line p-4 md:flex-row md:items-center md:justify-between">
+        <div>
+          <div className="flex items-center gap-2">
+            <FileSearch className="h-4 w-4 text-blue-600" />
+            <h3 id="available-ips-title" className="text-sm font-semibold">IPs candidatos a livres</h3>
+          </div>
+          <p className="mt-1 text-xs text-black/50">{candidateCount} endereco(s) nao apareceram no inventario desta varredura.</p>
+        </div>
+        <span className="rounded bg-blue-50 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-blue-700">Planejamento de IP fixo</span>
+      </div>
+      <div className="border-b border-amber-200 bg-amber-50 px-4 py-3 text-xs leading-5 text-amber-900">
+        <strong>Nao e garantia de disponibilidade.</strong> Um equipamento desligado ou bloqueado pelo firewall pode nao responder. Antes de cadastrar, confira as reservas e a faixa dinamica do DHCP e valide o IP novamente.
+      </div>
+      {groups.length ? (
+        <div className="grid gap-4 p-4 xl:grid-cols-2">
+          {groups.map((group) => (
+            <div key={group.subnet} className="min-w-0 rounded-lg border border-scan-line bg-white p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="font-mono text-sm font-bold">{group.subnet}</p>
+                  <p className="mt-1 text-xs text-black/45">{group.ips.length} candidato(s) · {group.occupied} endereco(s) ja observados</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => copyGroup(group)}
+                  disabled={!group.ips.length}
+                  className="flex h-8 items-center gap-2 rounded-md border border-scan-line px-2 text-[10px] font-bold uppercase tracking-wider transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 disabled:opacity-30"
+                >
+                  <ClipboardCopy className="h-3.5 w-3.5" />
+                  {copiedSubnet === group.subnet ? 'Copiado' : 'Copiar lista'}
+                </button>
+              </div>
+              <div className="mt-3 max-h-52 overflow-y-auto rounded-md border border-scan-line bg-black/[0.02] p-2">
+                <div className="grid grid-cols-2 gap-1 sm:grid-cols-3 md:grid-cols-4">
+                  {group.ips.map((ip) => (
+                    <span key={ip} className="rounded bg-white px-2 py-1 font-mono text-[11px] text-black/70">{ip}</span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="p-4 text-sm text-black/50">Nenhuma sub-rede IPv4 entre /24 e /30 esta disponivel no resultado atual. Execute uma varredura completa do pool primeiro.</p>
+      )}
+    </section>
+  );
+};
+
 function poolToRange(pool: string) {
   const [network] = pool.split('/');
   const parts = network.split('.');
   return `${parts[0]}.${parts[1]}.${parts[2]}.1-254`;
+}
+
+function buildAvailableIpGroups(result: ScanResult): AvailableIpGroup[] {
+  const occupied = new Set(result.devices.map((device) => device.ip));
+  const seenSubnets = new Set<string>();
+  const groups: AvailableIpGroup[] = [];
+
+  for (const vlan of result.vlans) {
+    const subnet = vlan.subnet;
+    if (seenSubnets.has(subnet)) continue;
+    seenSubnets.add(subnet);
+
+    const match = subnet.match(/^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/);
+    if (!match) continue;
+    const prefix = Number(match[2]);
+    if (prefix < 24 || prefix > 30) continue;
+
+    const networkIp = match[1];
+    const octets = networkIp.split('.').map(Number);
+    if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) continue;
+
+    const mask = (0xffffffff << (32 - prefix)) >>> 0;
+    const network = ipToNumber(networkIp) & mask;
+    const broadcast = (network | (~mask >>> 0)) >>> 0;
+    const ips: string[] = [];
+    let occupiedInSubnet = 0;
+
+    for (let value = network + 1; value < broadcast; value += 1) {
+      const ip = numberToIp(value >>> 0);
+      if (occupied.has(ip)) occupiedInSubnet += 1;
+      else ips.push(ip);
+    }
+
+    groups.push({ subnet: `${numberToIp(network)}/${prefix}`, ips, occupied: occupiedInSubnet });
+  }
+
+  return groups.sort((a, b) => ipToNumber(a.subnet.split('/')[0]) - ipToNumber(b.subnet.split('/')[0]));
 }
 
 const ExecutiveInsights = ({ result, onSelectDevice }: { result: ScanResult; onSelectDevice: (device: Device) => void }) => {
@@ -1442,6 +1588,10 @@ type FlowNodeData = {
   count?: number;
 };
 
+const FLOW_EXPORT_NODE_WIDTH = 200;
+const FLOW_EXPORT_NODE_HEIGHT = 76;
+const FLOW_EXPORT_MARGIN = 180;
+
 const flowNodeTypes = {
   runescan: ({ data }: NodeProps<Node<FlowNodeData>>) => {
     const node = data as FlowNodeData;
@@ -1474,63 +1624,206 @@ const flowNodeTypes = {
 
 const FlowNetworkMap = ({ result, onSelectDevice }: { result: ScanResult; onSelectDevice: (device: Device) => void }) => {
   const { nodes, edges } = useMemo(() => buildFlowElements(result), [result]);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const flowInstanceRef = useRef<ReactFlowInstance<Node<FlowNodeData>, Edge> | null>(null);
+  const [exporting, setExporting] = useState<'png' | 'pdf' | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  const exportTopology = async (format: 'png' | 'pdf') => {
+    const viewport = containerRef.current?.querySelector<HTMLElement>('.react-flow__viewport');
+    const instance = flowInstanceRef.current;
+    if (!viewport || !instance) {
+      setExportError('O mapa ainda esta carregando. Tente novamente em alguns segundos.');
+      return;
+    }
+
+    setExporting(format);
+    setExportError(null);
+
+    try {
+      await document.fonts?.ready;
+      const exportNodes = instance.getNodes().map((node) => ({
+        ...node,
+        measured: {
+          width: Math.max(FLOW_EXPORT_NODE_WIDTH, node.measured?.width || node.width || 0),
+          height: Math.max(FLOW_EXPORT_NODE_HEIGHT, node.measured?.height || node.height || 0),
+        },
+      }));
+      const bounds = getNodesBounds(exportNodes);
+      const width = Math.ceil(Math.max(1200, bounds.width + FLOW_EXPORT_MARGIN * 2));
+      const height = Math.ceil(Math.max(800, bounds.height + FLOW_EXPORT_MARGIN * 2));
+      const maxPixels = 32_000_000;
+      const pixelRatio = Math.max(1, Math.min(3, Math.sqrt(maxPixels / (width * height))));
+      const transform = getViewportForBounds(bounds, width, height, 0.1, 2, 0.08);
+      const { toPng } = await import('html-to-image');
+      const image = await toPng(viewport, {
+        backgroundColor: '#ffffff',
+        cacheBust: true,
+        width,
+        height,
+        pixelRatio,
+        style: {
+          width: `${width}px`,
+          height: `${height}px`,
+          transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.zoom})`,
+        },
+      });
+
+      const stamp = new Date().toISOString().slice(0, 10);
+      const target = result.target.replace(/[^a-zA-Z0-9.-]+/g, '-');
+      const baseName = `runescan-topologia-${target}-${stamp}`;
+
+      if (format === 'png') {
+        downloadDataUrl(image, `${baseName}.png`);
+      } else {
+        const { jsPDF } = await import('jspdf');
+        const orientation = width >= height ? 'landscape' : 'portrait';
+        const pdf = new jsPDF({ orientation, unit: 'pt', format: 'a3', compress: true });
+        const pageWidth = pdf.internal.pageSize.getWidth();
+        const pageHeight = pdf.internal.pageSize.getHeight();
+        const margin = 28;
+        const headerHeight = 48;
+        const availableWidth = pageWidth - margin * 2;
+        const availableHeight = pageHeight - margin * 2 - headerHeight;
+        const scale = Math.min(availableWidth / width, availableHeight / height);
+        const renderedWidth = width * scale;
+        const renderedHeight = height * scale;
+        const imageX = (pageWidth - renderedWidth) / 2;
+        const imageY = margin + headerHeight + (availableHeight - renderedHeight) / 2;
+
+        pdf.setFont('helvetica', 'bold');
+        pdf.setFontSize(16);
+        pdf.text('RuneScan - Topologia inferida da rede', margin, margin + 14);
+        pdf.setFont('helvetica', 'normal');
+        pdf.setFontSize(9);
+        pdf.setTextColor(90);
+        pdf.text(`Alvo: ${result.target} | ${nodes.filter((node) => (node.data as FlowNodeData).kind === 'device').length} ativos exibidos | Gerado em: ${new Date().toLocaleString('pt-BR')}`, margin, margin + 31);
+        pdf.addImage(image, 'PNG', imageX, imageY, renderedWidth, renderedHeight, undefined, 'FAST');
+        pdf.save(`${baseName}.pdf`);
+      }
+    } catch (error) {
+      console.error('Topology export error:', error);
+      setExportError('Nao foi possivel exportar. Reduza o zoom do navegador ou tente o PNG.');
+    } finally {
+      setExporting(null);
+    }
+  };
+
+  const displayedDevices = nodes.filter((node) => (node.data as FlowNodeData).kind === 'device').length;
+  const onlineDevices = result.devices.filter((device) => device.status === 'online').length;
 
   return (
-    <div className="h-[720px] overflow-hidden rounded-xl border border-scan-line bg-white/70">
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        nodeTypes={flowNodeTypes}
-        fitView
-        fitViewOptions={{ padding: 0.2 }}
-        minZoom={0.35}
-        maxZoom={1.35}
-        nodesDraggable
-        nodesConnectable={false}
-        elementsSelectable
-        onNodeClick={(_, node) => {
-          const device = (node.data as FlowNodeData).device;
-          if (device) onSelectDevice(device);
-        }}
-        proOptions={{ hideAttribution: true }}
-      >
-        <Background gap={22} size={1} color="rgba(16,20,24,0.14)" />
-        <Controls showInteractive={false} />
-      </ReactFlow>
+    <div>
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-wider text-black/45">
+            {displayedDevices} de {onlineDevices} ativos exibidos
+          </p>
+          <div className="mt-1 flex flex-wrap items-center gap-3 text-[9px] font-semibold uppercase tracking-wider text-black/35">
+            <span className="flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-green-500" />Baixo</span>
+            <span className="flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-orange-500" />Atencao</span>
+            <span className="flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-red-500" />Alto</span>
+            <span>Topologia inferida</span>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => exportTopology('png')}
+            disabled={Boolean(exporting)}
+            className="flex h-9 items-center gap-2 rounded-md border border-scan-line bg-white px-3 text-[10px] font-bold uppercase tracking-wider transition hover:border-scan-accent hover:bg-scan-accent hover:text-white disabled:cursor-wait disabled:opacity-60"
+            title="Baixar a topologia completa como imagem PNG em alta resolucao"
+          >
+            <FileImage className="h-3.5 w-3.5" />
+            {exporting === 'png' ? 'Gerando PNG...' : 'Baixar PNG HD'}
+          </button>
+          <button
+            type="button"
+            onClick={() => exportTopology('pdf')}
+            disabled={Boolean(exporting)}
+            className="flex h-9 items-center gap-2 rounded-md bg-scan-ink px-3 text-[10px] font-bold uppercase tracking-wider text-white transition hover:bg-scan-accent disabled:cursor-wait disabled:opacity-60"
+            title="Baixar a topologia completa em PDF A3"
+          >
+            <FileText className="h-3.5 w-3.5" />
+            {exporting === 'pdf' ? 'Gerando PDF...' : 'Baixar PDF A3'}
+          </button>
+        </div>
+      </div>
+      {exportError && <p className="mb-3 text-xs font-medium text-red-600" role="alert">{exportError}</p>}
+      <div ref={containerRef} className="h-[720px] overflow-hidden rounded-xl border border-scan-line bg-white/70">
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          nodeTypes={flowNodeTypes}
+          onInit={(instance) => { flowInstanceRef.current = instance; }}
+          fitView
+          fitViewOptions={{ padding: 0.12, minZoom: 0.1, maxZoom: 1 }}
+          minZoom={0.1}
+          maxZoom={1.35}
+          nodesDraggable
+          nodesConnectable={false}
+          elementsSelectable
+          onNodeClick={(_, node) => {
+            const device = (node.data as FlowNodeData).device;
+            if (device) onSelectDevice(device);
+          }}
+          proOptions={{ hideAttribution: true }}
+        >
+          <Background gap={22} size={1} color="rgba(16,20,24,0.14)" />
+          <Controls showInteractive={false} />
+        </ReactFlow>
+      </div>
     </div>
   );
 };
 
+function downloadDataUrl(dataUrl: string, filename: string) {
+  const link = document.createElement('a');
+  link.download = filename;
+  link.href = dataUrl;
+  link.click();
+}
+
 function buildFlowElements(result: ScanResult): { nodes: Node<FlowNodeData>[]; edges: Edge[] } {
+  const online = result.devices.filter((device) => device.status === 'online');
   const nodes: Node<FlowNodeData>[] = [{
     id: 'root',
     type: 'runescan',
-    position: { x: 0, y: 260 },
-    data: { label: 'RuneScan', detail: result.target, kind: 'root', count: result.summary.online },
+    position: { x: 0, y: 0 },
+    data: { label: 'RuneScan', detail: result.target, kind: 'root', count: online.length },
   }];
   const edges: Edge[] = [];
-  const online = result.devices.filter((device) => device.status === 'online');
-  const subnets = result.vlans.slice(0, 8);
-  const hostColumns = 3;
-  const hostColumnGap = 340;
-  const hostRowGap = 128;
-  const poolGap = 120;
+  const assignedDeviceIds = new Set<string>();
+  const groups = result.vlans.map((subnet) => {
+    const devices = online.filter((device) =>
+      !assignedDeviceIds.has(device.id) && (device.subnet === subnet.subnet || device.vlan === subnet.name)
+    );
+    devices.forEach((device) => assignedDeviceIds.add(device.id));
+    return { id: subnet.id, name: subnet.name, subnet: subnet.subnet, devices };
+  }).filter((group) => group.devices.length > 0);
+  const unassigned = online.filter((device) => !assignedDeviceIds.has(device.id));
+  if (unassigned.length > 0) {
+    groups.push({ id: 'unassigned', name: 'Sem segmento', subnet: 'nao confirmado', devices: unassigned });
+  }
+
+  const hostColumns = 5;
+  const hostColumnGap = 260;
+  const hostRowGap = 105;
+  const poolGap = 110;
   let yCursor = 0;
 
-  subnets.forEach((subnet, subnetIndex) => {
+  groups.forEach((group) => {
     const y = yCursor;
-    const subnetId = `subnet-${subnet.id}`;
-    const devices = online
-      .filter((device) => device.subnet === subnet.subnet || device.vlan === subnet.name)
-      .sort((a, b) => riskWeight(b) - riskWeight(a) || ipToNumber(a.ip) - ipToNumber(b.ip))
-      .slice(0, 9);
+    const subnetId = `subnet-${group.id}`;
+    const devices = group.devices
+      .sort((a, b) => riskWeight(b) - riskWeight(a) || ipToNumber(a.ip) - ipToNumber(b.ip));
     const hostRows = Math.max(1, Math.ceil(devices.length / hostColumns));
 
     nodes.push({
       id: subnetId,
       type: 'runescan',
-        position: { x: 320, y },
-      data: { label: subnet.name.replace('Sub-rede ', ''), detail: subnet.subnet, kind: 'subnet', count: devices.length, risk: devices.some((device) => device.riskLevel === 'high') ? 'high' : 'low' },
+      position: { x: 300, y },
+      data: { label: group.name.replace('Sub-rede ', ''), detail: group.subnet, kind: 'subnet', count: devices.length, risk: devices.some((device) => device.riskLevel === 'high') ? 'high' : 'low' },
     });
     edges.push(flowEdge(`root-${subnetId}`, 'root', subnetId));
 
@@ -1541,7 +1834,7 @@ function buildFlowElements(result: ScanResult): { nodes: Node<FlowNodeData>[]; e
       nodes.push({
         id: deviceId,
         type: 'runescan',
-        position: { x: 760 + column * hostColumnGap, y: y - 54 + row * hostRowGap },
+        position: { x: 650 + column * hostColumnGap, y: y - 44 + row * hostRowGap },
         data: {
           label: device.name,
           detail: `${device.ip} / ${(device.openPorts || []).slice(0, 4).join(', ') || 'sem portas'}`,
@@ -1555,6 +1848,8 @@ function buildFlowElements(result: ScanResult): { nodes: Node<FlowNodeData>[]; e
 
     yCursor += hostRows * hostRowGap + poolGap;
   });
+
+  nodes[0].position.y = Math.max(0, (yCursor - poolGap - FLOW_EXPORT_NODE_HEIGHT) / 2);
 
   return { nodes, edges };
 }
@@ -1774,6 +2069,10 @@ function ipToNumber(ip: string) {
   return ip.split('.').reduce((total, part) => ((total << 8) + Number(part)) >>> 0, 0);
 }
 
+function numberToIp(value: number) {
+  return [24, 16, 8, 0].map((shift) => (value >>> shift) & 255).join('.');
+}
+
 function isIpLiteral(value: string) {
   const parts = value.split('.');
   return parts.length === 4 && parts.every((part) => {
@@ -1957,11 +2256,13 @@ const DeviceDetails = ({
 
 const AiPanel = ({
   analyzing,
+  networkAnalyzing,
   analysis,
   onGenerate,
   onGenerateNetwork,
 }: {
   analyzing: boolean;
+  networkAnalyzing: boolean;
   analysis: string | null;
   onGenerate: () => void;
   onGenerateNetwork: () => void;
@@ -1978,7 +2279,8 @@ const AiPanel = ({
       <div className="flex flex-wrap gap-2">
         <button
           onClick={onGenerateNetwork}
-          className="relative flex h-9 items-center justify-center gap-2 rounded-md border border-white/15 px-3 text-xs font-bold uppercase tracking-wider text-white transition hover:bg-white hover:text-scan-ink"
+          disabled={networkAnalyzing}
+          className="relative flex h-9 items-center justify-center gap-2 rounded-md border border-white/15 px-3 text-xs font-bold uppercase tracking-wider text-white transition hover:bg-white hover:text-scan-ink disabled:cursor-not-allowed disabled:opacity-60"
           title="Gerar parecer geral da varredura em modal"
         >
           <Network className="h-4 w-4" />
