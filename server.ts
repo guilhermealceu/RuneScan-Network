@@ -20,6 +20,7 @@ import {
 } from "./src/server/discovery";
 import { getScanPolicy, isAbortError, validateCaptureDuration, validateScanTarget } from "./src/server/scan-policy";
 import { ScanBusyError, ScanManager, type ManagedScan } from "./src/server/scan-manager";
+import { AccessController, getAccessPolicy } from "./src/server/access-policy";
 
 dotenv.config();
 
@@ -37,8 +38,38 @@ const scanManager = new ScanManager();
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT || 3000);
+  const accessPolicy = getAccessPolicy();
+  const accessController = new AccessController(accessPolicy);
 
-  app.use(express.json());
+  app.use(express.json({ limit: "256kb" }));
+
+  app.get("/api/access", (req, res) => {
+    res.json({
+      lanEnabled: accessPolicy.lanEnabled,
+      authRequired: accessPolicy.authRequired,
+      authenticated: accessController.isAuthorized(req.headers.cookie),
+    });
+  });
+
+  app.post("/api/auth", (req, res) => {
+    const sessionId = accessController.createSession(req.body?.token);
+    if (!sessionId) {
+      res.status(401).json({ error: "Token invalido." });
+      return;
+    }
+    if (accessPolicy.authRequired) {
+      res.setHeader("Set-Cookie", accessController.buildSessionCookie(sessionId));
+    }
+    res.json({ authenticated: true });
+  });
+
+  app.use("/api", (req, res, next) => {
+    if (accessController.isAuthorized(req.headers.cookie)) {
+      next();
+      return;
+    }
+    res.status(401).json({ error: "Autenticacao necessaria para acessar o RuneScan pela rede." });
+  });
 
   app.get("/api/config", async (_req, res) => {
     res.json({
@@ -340,16 +371,25 @@ async function startServer() {
     });
   }
 
-  await listenWithFallback(app, PORT);
+  await listenWithFallback(app, PORT, accessPolicy.host);
 }
 
 startServer();
 
-function listenWithFallback(app: Express, preferredPort: number, attempts = 10) {
+function listenWithFallback(
+  app: Express,
+  preferredPort: number,
+  host: "127.0.0.1" | "0.0.0.0",
+  attempts = 10,
+) {
   return new Promise<void>((resolve, reject) => {
     const tryPort = (port: number, remaining: number) => {
-      const server = app.listen(port, "0.0.0.0", () => {
-        console.log(`RuneScan Network running at http://0.0.0.0:${port}`);
+      const server = app.listen(port, host, () => {
+        const displayHost = host === "127.0.0.1" ? "localhost" : host;
+        console.log(`RuneScan Network running at http://${displayHost}:${port}`);
+        if (host === "0.0.0.0") {
+          console.log("Acesso pela rede ativado; autenticacao por token obrigatoria.");
+        }
         if (port !== preferredPort) {
           console.log(`Porta ${preferredPort} ja estava em uso; usando ${port}.`);
         }

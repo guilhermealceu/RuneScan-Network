@@ -136,6 +136,19 @@ http://127.0.0.1:3005
 
 Se a porta estiver ocupada, o servidor tenta as portas seguintes e informa o endereco correto no terminal.
 
+### Acessar de outro computador da rede
+
+Por seguranca, o RuneScan aceita somente conexoes do proprio computador por padrao. Para liberar o painel na rede local, edite o `.env`:
+
+```env
+ALLOW_LAN_ACCESS=true
+API_TOKEN="use-aqui-um-token-com-pelo-menos-24-caracteres"
+```
+
+Reinicie o servidor e abra `http://IP-DO-COMPUTADOR:3005` na outra maquina. O RuneScan mostrara uma tela de entrada. A sessao fica valida por ate oito horas; o token nao e gravado no armazenamento do navegador.
+
+Nao reutilize senha pessoal nesse campo e nao exponha a porta diretamente na internet.
+
 ## Como usar
 
 ### Informar o alvo
@@ -198,6 +211,8 @@ O relatorio e gerado no navegador e salvo na pasta de downloads do usuario.
 | Variavel | Padrao | Descricao |
 | --- | --- | --- |
 | `PORT` | `3005` | Porta inicial do servidor web |
+| `ALLOW_LAN_ACCESS` | `false` | Quando `true`, permite acesso de outras maquinas da rede |
+| `API_TOKEN` | vazio | Token com pelo menos 24 caracteres, obrigatorio quando o acesso pela rede esta ativo |
 | `OLLAMA_URL` | `http://localhost:11434` | Endereco local do Ollama |
 | `OLLAMA_MODEL` | `qwen2.5:3b` | Modelo usado nos pareceres |
 | `OLLAMA_NUM_CTX` | `2048` | Tamanho do contexto do modelo |
@@ -302,6 +317,6 @@ Os arquivos gerados ficam em `dist/`.
 
 ## Seguranca
 
-O servidor atualmente e voltado para uso local. Ele inicia na interface `0.0.0.0`, portanto pode ficar acessivel para outras maquinas dependendo do firewall do Windows.
+O servidor escuta em `127.0.0.1` por padrao e nao aceita conexoes de outras maquinas. O acesso pela rede precisa ser ativado explicitamente com `ALLOW_LAN_ACCESS=true`; nesse modo, um `API_TOKEN` forte e obrigatorio e todas as APIs ficam protegidas por uma sessao HTTP-only temporaria.
 
-Nao publique o RuneScan diretamente na internet. Para uso compartilhado ou corporativo, adicione autenticacao, limite de requisicoes e restricao de origem antes de liberar o acesso.
+Nao publique o RuneScan diretamente na internet. Para uso compartilhado ou corporativo, mantenha tambem o firewall restrito a rede autorizada. Limite de requisicoes sera tratado em uma etapa posterior.
