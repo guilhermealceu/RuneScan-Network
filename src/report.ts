@@ -44,6 +44,25 @@ export function buildHumanActionItems(devices: Device[]) {
   ].filter((item): item is string => Boolean(item));
 }
 
+export function exportExecutiveHtmlReport(result: ScanResult | null, devices: Device[]) {
+  if (!devices.length) return;
+  const exportedAt = new Date().toISOString();
+  const online = devices.filter((device) => device.status === 'online');
+  const high = online.filter((device) => device.riskLevel === 'high');
+  const medium = online.filter((device) => device.riskLevel === 'medium');
+  const identified = online.filter((device) => device.type !== 'unknown');
+  const registered = online.filter((device) => device.responsible || device.department);
+  const actions = buildHumanActionItems(online);
+  const priorityRows = [...high, ...medium].slice(0, 15).map((device) => `<tr><td><strong>${escapeHtml(device.name)}</strong><small>${escapeHtml(device.ip)}</small></td><td>${escapeHtml(TYPE_LABEL[device.type])}</td><td>${escapeHtml(device.responsible || 'Nao definido')}<small>${escapeHtml(device.department || '')}</small></td><td>${escapeHtml(deviceAction(device))}</td></tr>`).join('');
+  const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RuneScan | Relatorio executivo</title><style>
+  :root{--ink:#17202a;--muted:#64748b;--line:#dfe5eb;--brand:#f15a24;--bg:#f4f6f8}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 Inter,system-ui,sans-serif}.page{max-width:1050px;margin:auto;padding:38px 20px}.card{background:#fff;border:1px solid var(--line);border-radius:18px;padding:28px;margin-bottom:20px}h1{margin:0;color:var(--brand);font-size:34px}h2{margin:0 0 12px}.meta,small{display:block;color:var(--muted)}.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:24px}.stat{border:1px solid var(--line);border-radius:12px;padding:14px;text-align:center}.stat b{display:block;font-size:25px}.stat span{font-size:10px;text-transform:uppercase;color:var(--muted)}li{margin:8px 0}table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1px solid var(--line);padding:11px;vertical-align:top}th{font-size:10px;text-transform:uppercase;color:var(--muted)}@media(max-width:700px){.stats{grid-template-columns:repeat(2,1fr)}}@media print{body{background:#fff}.page{padding:0}.card{break-inside:avoid}}</style></head><body><main class="page">
+  <section class="card"><h1>RUNESCAN</h1><p class="meta">Relatorio executivo · ${escapeHtml(result?.target || 'Rede local')} · ${escapeHtml(formatDate(exportedAt))}</p><p><strong>${online.length} equipamentos responderam.</strong> Este documento resume prioridades de gestao; detalhes de portas, servicos e evidencias ficam no relatorio tecnico.</p><div class="stats"><div class="stat"><b>${devices.length}</b><span>Inventario</span></div><div class="stat"><b>${online.length}</b><span>Online</span></div><div class="stat"><b>${high.length}</b><span>Revisar primeiro</span></div><div class="stat"><b>${identified.length}</b><span>Identificados</span></div><div class="stat"><b>${registered.length}</b><span>Com responsavel/setor</span></div></div></section>
+  <section class="card"><h2>Decisoes recomendadas</h2><ol>${actions.map((action) => `<li>${escapeHtml(action)}</li>`).join('') || '<li>Manter o inventario atualizado e repetir a verificacao periodicamente.</li>'}</ol></section>
+  <section class="card"><h2>Equipamentos que exigem acompanhamento</h2>${priorityRows ? `<table><thead><tr><th>Equipamento</th><th>Funcao</th><th>Responsavel</th><th>Proxima acao</th></tr></thead><tbody>${priorityRows}</tbody></table>` : '<p>Nenhum equipamento ficou nas prioridades alta ou media nesta execucao.</p>'}</section>
+  <p class="meta">A prioridade organiza a revisao humana e nao comprova vulnerabilidade ou invasao.</p></main></body></html>`;
+  downloadHtml(html, `runescan-relatorio-executivo-${exportedAt.replace(/[:.]/g, '-')}.html`);
+}
+
 export function exportHumanHtmlReport(result: ScanResult | null, devices: Device[]) {
   if (!devices.length) return;
 
@@ -64,10 +83,10 @@ export function exportHumanHtmlReport(result: ScanResult | null, devices: Device
   const inventoryRows = inventory.map((device) => `
     <tr class="row-${device.riskLevel || 'low'}">
       <td><div class="identity"><span class="type-icon" aria-hidden="true">${TYPE_ICON[device.type]}</span><span><strong>${escapeHtml(device.name)}</strong><small>${escapeHtml(TYPE_LABEL[device.type])}${device.vendor ? ` · ${escapeHtml(device.vendor)}` : ''}</small></span></div></td>
-      <td><span class="mono">${escapeHtml(device.ip)}</span><small>${escapeHtml(device.vlan)}</small></td>
+      <td><span class="mono">${escapeHtml(device.ip)}</span><small>${escapeHtml(device.vlan)}${device.fixedIp ? ` · Fixo: ${escapeHtml(device.fixedIp)}` : ''}</small></td>
       <td>${escapeHtml(formatPorts(device.openPorts))}</td>
       <td><span class="tag tag-${device.riskLevel || 'low'}">${riskLabel(device.riskLevel)}</span></td>
-      <td>${escapeHtml(deviceAction(device))}</td>
+      <td>${escapeHtml(deviceAction(device))}<small>${escapeHtml([device.responsible, device.department].filter(Boolean).join(' · ') || 'Responsavel/setor nao informado')}</small></td>
     </tr>
   `).join('');
 
@@ -90,7 +109,7 @@ ${pools ? `<div class="pools">${pools}</div>` : ''}</header>
 <h2 class="inventory-title">Dispositivos encontrados</h2><p class="inventory-intro">Cada equipamento aparece uma unica vez, ja ordenado por prioridade.</p><div class="table-wrap"><table><thead><tr><th>Dispositivo / Tipo</th><th>IP / Rede</th><th>Portas e servicos</th><th>Prioridade</th><th>Acao</th></tr></thead><tbody>${inventoryRows}</tbody></table></div>
 <footer>RuneScan Network Intelligence · pilgrims.dev · &copy; ${new Date().getFullYear()}</footer></main></body></html>`;
 
-  downloadHtml(html, `runescan-relatorio-humano-${exportedAt.replace(/[:.]/g, '-')}.html`);
+  downloadHtml(html, `runescan-relatorio-tecnico-${exportedAt.replace(/[:.]/g, '-')}.html`);
 }
 
 function deviceAction(device: Device) {

@@ -1,11 +1,13 @@
 import type { ScanResult } from "../types";
+import type { DeviceProfile } from "../experience/inventory-experience";
 
 export const INVENTORY_CACHE_VERSION = 2;
 export const LEGACY_STORAGE_KEY = "runescan:last-result";
 const FALLBACK_STORAGE_KEY = "runescan:inventory-cache:v2";
 const DB_NAME = "runescan-network";
 const STORE_NAME = "inventories";
-const DB_VERSION = 1;
+const PROFILE_STORE_NAME = "device-profiles";
+const DB_VERSION = 2;
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_HISTORY = 25;
 
@@ -70,6 +72,33 @@ export async function loadLatestInventory(): Promise<ScanResult | null> {
   return legacy;
 }
 
+export async function listInventoryHistory(): Promise<InventoryCacheRecord[]> {
+  try {
+    const database = await openDatabase();
+    return (await readAllRecords(database))
+      .map((record) => parseInventoryCacheRecord(record))
+      .filter((record): record is InventoryCacheRecord => Boolean(record))
+      .sort((a, b) => b.savedAt.localeCompare(a.savedAt));
+  } catch {
+    const fallback = parseFallbackRecord();
+    return fallback ? [fallback] : [];
+  }
+}
+
+export async function loadDeviceProfiles(): Promise<DeviceProfile[]> {
+  try {
+    const database = await openDatabase();
+    return await requestAsPromise(database.transaction(PROFILE_STORE_NAME, "readonly").objectStore(PROFILE_STORE_NAME).getAll());
+  } catch {
+    return [];
+  }
+}
+
+export async function saveDeviceProfile(profile: DeviceProfile): Promise<void> {
+  const database = await openDatabase();
+  await requestAsPromise(database.transaction(PROFILE_STORE_NAME, "readwrite").objectStore(PROFILE_STORE_NAME).put(profile));
+}
+
 export async function saveInventory(result: ScanResult): Promise<void> {
   const record = createInventoryCacheRecord(result);
   try {
@@ -123,6 +152,9 @@ function openDatabase(): Promise<IDBDatabase> {
       if (!database.objectStoreNames.contains(STORE_NAME)) {
         const store = database.createObjectStore(STORE_NAME, { keyPath: "id" });
         store.createIndex("savedAt", "savedAt");
+      }
+      if (!database.objectStoreNames.contains(PROFILE_STORE_NAME)) {
+        database.createObjectStore(PROFILE_STORE_NAME, { keyPath: "key" });
       }
     };
     request.onsuccess = () => resolve(request.result);

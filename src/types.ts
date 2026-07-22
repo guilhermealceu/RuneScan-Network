@@ -19,6 +19,11 @@ export interface Device {
   riskLevel?: 'low' | 'medium' | 'high';
   services?: ServiceProbe[];
   evidence?: string[];
+  fixedIp?: string;
+  responsible?: string;
+  department?: string;
+  notes?: string;
+  identitySource?: 'detected' | 'inferred' | 'manual';
 }
 
 export interface ScanResult {

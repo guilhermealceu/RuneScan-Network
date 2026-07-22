@@ -208,12 +208,33 @@ O painel:
 
 > Um IP que nao respondeu nao esta necessariamente livre. O equipamento pode estar desligado, com firewall ou fora do alcance dos testes. Antes de configurar um IP fixo, confira a faixa dinamica e as reservas do servidor DHCP e valide novamente o endereco.
 
+## Busca, filtros e itens que exigem acao
+
+Depois da varredura, a barra do inventario permite buscar por nome, IP, MAC, fabricante, tipo, porta, responsavel, setor ou IP fixo cadastrado. Tambem e possivel filtrar por tipo de equipamento, prioridade e segmento.
+
+O modo **Somente acao** mostra equipamentos online com prioridade alta/media ou ainda sem tipo confirmado.
+
+## Historico e comparacao
+
+O botao de historico lista as varreduras preservadas no IndexedDB. Uma execucao anterior pode ser comparada com o inventario atual. A interface destaca:
+
+- Equipamento novo.
+- Equipamento que deixou de responder.
+- Porta que apareceu desde a execucao comparada.
+
+A comparacao usa o MAC como identidade principal e o IP quando o MAC nao esta disponivel.
+
+## Cadastro manual
+
+Ao abrir um equipamento, use **Cadastro do equipamento** para informar nome, tipo, IP fixo planejado, responsavel, setor e observacoes. O cadastro e preservado separadamente do historico e reaplicado nas proximas varreduras pelo MAC ou IP.
+
 ## Relatorios
 
-Na area de topologia existem duas exportacoes:
+Na area de topologia existem tres exportacoes:
 
-- **JSON:** preserva os dados completos para auditoria, integracao ou analise tecnica.
-- **HTML:** gera uma versao direta para leitura humana, com icone/tipo, IP, portas, prioridade e acao recomendada sem repetir o equipamento em varias secoes.
+- **Executivo HTML:** resumo para gestao, com cobertura, prioridades, responsaveis e proximas decisoes, sem excesso de portas e evidencias.
+- **Tecnico HTML:** inventario direto com tipo, IP, portas, prioridade, cadastro e acao recomendada.
+- **Tecnico JSON:** preserva todos os dados, servicos, evidencias e campos manuais para auditoria e integracao.
 
 O relatorio e gerado no navegador e salvo na pasta de downloads do usuario.
 

@@ -4,7 +4,8 @@ import type { Edge, Node, NodeProps, Position as FlowPosition, ReactFlowInstance
 import '@xyflow/react/dist/style.css';
 import { CollectorRun, Device, LocalNetworkContext, ScanResult, ToolCapability } from '../types';
 import { NetworkTree } from './NetworkTree';
-import { clearInventoryCache, loadLatestInventory, saveInventory } from '../storage/inventory-cache';
+import { clearInventoryCache, listInventoryHistory, loadDeviceProfiles, loadLatestInventory, saveDeviceProfile, saveInventory, type InventoryCacheRecord } from '../storage/inventory-cache';
+import { applyDeviceProfile, applyDeviceProfiles, compareScans, deviceIdentityKey, filterDevices, type DeviceProfile, type InventoryFilters, type ScanComparison } from '../experience/inventory-experience';
 import {
   Activity,
   AlertTriangle,
@@ -18,6 +19,7 @@ import {
   FileSearch,
   FileText,
   Globe,
+  History,
   Info,
   KeyRound,
   LayoutGrid,
@@ -99,10 +101,15 @@ export const NetworkDashboard: React.FC = () => {
   const [headerCompact, setHeaderCompact] = useState(false);
   const [insightsVisible, setInsightsVisible] = useState(false);
   const [availableIpsOpen, setAvailableIpsOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [history, setHistory] = useState<InventoryCacheRecord[]>([]);
+  const [comparison, setComparison] = useState<ScanComparison | null>(null);
+  const [filters, setFilters] = useState<InventoryFilters>({ search: '', type: '', risk: '', segment: '', actionOnly: false });
   const eventSourceRef = useRef<EventSource | null>(null);
   const detailsRef = useRef<HTMLDivElement | null>(null);
   const previousScanRef = useRef<ScanResult | null>(null);
   const skipNextPersistRef = useRef(false);
+  const profilesRef = useRef<DeviceProfile[]>([]);
 
   const tools = scanResult?.tools || config?.tools || [];
   const localContext = scanResult?.localContext || config?.localContext;
@@ -130,6 +137,7 @@ export const NetworkDashboard: React.FC = () => {
   const highRiskDevices = useMemo(() => {
     return (scanResult?.devices || []).filter((device) => device.riskLevel === 'high');
   }, [scanResult]);
+  const filteredDevices = useMemo(() => filterDevices(scanResult?.devices || [], filters), [scanResult, filters]);
 
   const enterWorkMode = () => setHeaderCompact(true);
 
@@ -161,7 +169,9 @@ export const NetworkDashboard: React.FC = () => {
 
     source.addEventListener('done', (event) => {
       const payload = JSON.parse(event.data) as ScanResult;
-      const merged = mergeOfflineDevices(previousScanRef.current, payload, target);
+      const profiled = applyDeviceProfiles(payload, profilesRef.current);
+      setComparison(compareScans(previousScanRef.current, profiled));
+      const merged = mergeOfflineDevices(previousScanRef.current, profiled, target);
       setScanResult(merged);
       previousScanRef.current = null;
       setCurrentStage('finalizado');
@@ -209,6 +219,8 @@ export const NetworkDashboard: React.FC = () => {
     eventSourceRef.current = null;
     previousScanRef.current = null;
     void clearInventoryCache();
+    setHistory([]);
+    setComparison(null);
     setScanResult(null);
     setSelectedDevice(null);
     setAiAnalysis(null);
@@ -330,12 +342,34 @@ export const NetworkDashboard: React.FC = () => {
     }
   };
 
+  const saveRegistration = async (profile: DeviceProfile) => {
+    await saveDeviceProfile(profile);
+    profilesRef.current = [...profilesRef.current.filter((item) => item.key !== profile.key), profile];
+    skipNextPersistRef.current = true;
+    setScanResult((current) => current ? {
+      ...current,
+      devices: current.devices.map((device) => deviceIdentityKey(device) === profile.key ? applyDeviceProfile(device, profile) : device),
+    } : current);
+    setSelectedDevice((current) => current && deviceIdentityKey(current) === profile.key ? applyDeviceProfile(current, profile) : current);
+  };
+
+  const compareWithHistory = (record: InventoryCacheRecord) => {
+    if (!scanResult) return;
+    setComparison(compareScans(record.result, scanResult));
+    setHistoryOpen(false);
+  };
+
   useEffect(() => {
     let active = true;
-    void loadLatestInventory().then((cached) => {
-      if (active && cached) {
+    void Promise.all([loadLatestInventory(), loadDeviceProfiles(), listInventoryHistory()]).then(([cached, profiles, storedHistory]) => {
+      if (!active) return;
+      profilesRef.current = profiles;
+      setHistory(storedHistory);
+      if (cached) {
         skipNextPersistRef.current = true;
-        setScanResult(cached);
+        const profiled = applyDeviceProfiles(cached, profiles);
+        setScanResult(profiled);
+        if (storedHistory[1]) setComparison(compareScans(storedHistory[1].result, profiled));
       }
     }).catch(() => undefined);
 
@@ -358,7 +392,7 @@ export const NetworkDashboard: React.FC = () => {
       return;
     }
     const timer = window.setTimeout(() => {
-      void saveInventory(scanResult);
+      void saveInventory(scanResult).then(() => listInventoryHistory()).then(setHistory).catch(() => undefined);
     }, 1500);
     return () => window.clearTimeout(timer);
   }, [scanResult]);
@@ -506,6 +540,16 @@ export const NetworkDashboard: React.FC = () => {
                   <FileSearch className="h-4 w-4" />
                 </button>
                 <button
+                  type="button"
+                  onClick={() => setHistoryOpen(true)}
+                  disabled={history.length === 0}
+                  aria-label="Abrir historico de varreduras"
+                  className="flex h-10 w-10 items-center justify-center rounded-md border border-scan-line bg-white text-scan-ink transition hover:border-violet-200 hover:bg-violet-50 hover:text-violet-700 disabled:cursor-not-allowed disabled:opacity-30"
+                  title="Historico e comparacao entre varreduras"
+                >
+                  <History className="h-4 w-4" />
+                </button>
+                <button
                   onClick={clearInventory}
                   aria-label="Limpar inventario"
                   className="flex h-10 w-10 items-center justify-center rounded-md border border-scan-line bg-white text-scan-ink transition hover:border-red-200 hover:bg-red-50 hover:text-red-700"
@@ -589,10 +633,20 @@ export const NetworkDashboard: React.FC = () => {
         />
       )}
 
+      {scanResult && (
+        <InventoryFilterBar
+          devices={scanResult.devices}
+          filters={filters}
+          visibleCount={filteredDevices.length}
+          comparison={comparison}
+          onChange={setFilters}
+        />
+      )}
+
       <section className="grid grid-cols-1 gap-6 lg:gap-8 lg:grid-cols-[350px_1fr] xl:grid-cols-[400px_1fr] 2xl:grid-cols-[450px_1fr]">
         <div>
           <div className="sticky top-10 flex flex-col gap-6">
-            <NetworkTree result={scanResult} devices={scanResult?.devices || []} onSelectDevice={selectDevice} />
+            <NetworkTree result={scanResult} devices={filteredDevices} onSelectDevice={selectDevice} changes={comparison?.changes || {}} />
             <SegmentPanel result={scanResult} />
           </div>
         </div>
@@ -633,6 +687,7 @@ export const NetworkDashboard: React.FC = () => {
                   diagnosticLoading={diagnosticLoading}
                   onRunDiagnostic={(kind) => runDeviceDiagnostic(selectedDevice, kind)}
                 />
+                <DeviceRegistration device={selectedDevice} onSave={saveRegistration} />
                 <AiPanel
                   analyzing={analyzing}
                   networkAnalyzing={networkAnalyzing}
@@ -664,7 +719,53 @@ export const NetworkDashboard: React.FC = () => {
         progress={progress}
         onClose={() => setCollectorsOpen(false)}
       />
+      <HistoryModal
+        open={historyOpen}
+        history={history}
+        current={scanResult}
+        onCompare={compareWithHistory}
+        onClose={() => setHistoryOpen(false)}
+      />
     </div>
+  );
+};
+
+const InventoryFilterBar = ({ devices, filters, visibleCount, comparison, onChange }: {
+  devices: Device[];
+  filters: InventoryFilters;
+  visibleCount: number;
+  comparison: ScanComparison | null;
+  onChange: (filters: InventoryFilters) => void;
+}) => {
+  const segments = Array.from(new Set(devices.map((device) => device.subnet || device.vlan).filter(Boolean))).sort();
+  const update = (changes: Partial<InventoryFilters>) => onChange({ ...filters, ...changes });
+  return (
+    <section className="panel-surface rounded-xl p-4">
+      <div className="grid gap-3 lg:grid-cols-[minmax(240px,1fr)_repeat(3,180px)_auto]">
+        <label className="flex items-center gap-2 rounded-lg border border-scan-line bg-white px-3">
+          <Search className="h-4 w-4 text-black/35" />
+          <input value={filters.search} onChange={(event) => update({ search: event.target.value })} className="min-w-0 flex-1 bg-transparent py-2.5 text-sm outline-none" placeholder="Nome, IP, fabricante, tipo ou porta" />
+        </label>
+        <select value={filters.type} onChange={(event) => update({ type: event.target.value })} className="rounded-lg border border-scan-line bg-white px-3 py-2.5 text-sm">
+          <option value="">Todos os equipamentos</option>
+          {Array.from(new Set(devices.map((device) => device.type))).sort().map((type) => <option key={type} value={type}>{deviceTypeLabel(type)}</option>)}
+        </select>
+        <select value={filters.risk} onChange={(event) => update({ risk: event.target.value })} className="rounded-lg border border-scan-line bg-white px-3 py-2.5 text-sm">
+          <option value="">Todas as prioridades</option><option value="high">Revisar primeiro</option><option value="medium">Revisar depois</option><option value="low">Rotina</option>
+        </select>
+        <select value={filters.segment} onChange={(event) => update({ segment: event.target.value })} className="rounded-lg border border-scan-line bg-white px-3 py-2.5 text-sm">
+          <option value="">Todos os segmentos</option>
+          {segments.map((segment) => <option key={segment} value={segment}>{segment}</option>)}
+        </select>
+        <button type="button" onClick={() => update({ actionOnly: !filters.actionOnly })} aria-pressed={filters.actionOnly} className={`rounded-lg border px-4 py-2.5 text-xs font-bold uppercase tracking-wider ${filters.actionOnly ? 'border-orange-200 bg-orange-50 text-orange-700' : 'border-scan-line bg-white text-black/55'}`}>
+          {filters.actionOnly ? 'Exigindo ação' : 'Somente ação'}
+        </button>
+      </div>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-black/45">
+        <span>{visibleCount} de {devices.length} equipamento(s) visíveis</span>
+        {comparison && <span className="font-mono">Comparação: +{comparison.newCount} novos · -{comparison.removedCount} removidos · {comparison.newPortCount} porta(s) nova(s)</span>}
+      </div>
+    </section>
   );
 };
 
@@ -931,6 +1032,35 @@ const AppModal = ({
       </motion.div>
     )}
   </AnimatePresence>
+);
+
+const HistoryModal = ({ open, history, current, onCompare, onClose }: {
+  open: boolean;
+  history: InventoryCacheRecord[];
+  current: ScanResult | null;
+  onCompare: (record: InventoryCacheRecord) => void;
+  onClose: () => void;
+}) => (
+  <AppModal open={open} title="Historico de varreduras" icon={<History className="h-4 w-4 text-violet-600" />} onClose={onClose}>
+    <div className="grid gap-3">
+      <p className="text-sm leading-6 text-black/55">Selecione uma execução anterior para comparar com o inventário atualmente exibido.</p>
+      {history.map((record, index) => {
+        const sameExecution = record.result.timestamp === current?.timestamp;
+        return (
+          <div key={record.id} className="flex flex-col gap-3 rounded-xl border border-scan-line bg-white/75 p-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <div className="flex items-center gap-2"><strong className="font-mono text-sm">{record.result.target}</strong>{index === 0 && <span className="rounded bg-green-50 px-2 py-0.5 text-[9px] font-bold uppercase text-green-700">mais recente</span>}</div>
+              <p className="mt-1 text-xs text-black/45">{new Date(record.savedAt).toLocaleString('pt-BR')} · {record.result.summary.total} equipamentos · {record.result.summary.highRisk} prioritários</p>
+            </div>
+            <button type="button" onClick={() => onCompare(record)} disabled={!current || sameExecution} className="rounded-lg border border-scan-line bg-white px-3 py-2 text-xs font-bold uppercase tracking-wider hover:border-violet-200 hover:bg-violet-50 hover:text-violet-700 disabled:opacity-35">
+              {sameExecution ? 'Em exibição' : 'Comparar'}
+            </button>
+          </div>
+        );
+      })}
+      {history.length === 0 && <p className="rounded-lg border border-dashed border-scan-line p-8 text-center text-sm text-black/45">O histórico será criado após a primeira varredura concluída.</p>}
+    </div>
+  </AppModal>
 );
 
 const ToolsModal = ({ open, tools, onClose }: { open: boolean; tools: ToolCapability[]; onClose: () => void }) => (
@@ -2062,6 +2192,49 @@ function isIpLiteral(value: string) {
   });
 }
 
+const DeviceRegistration = ({ device, onSave }: { device: Device; onSave: (profile: DeviceProfile) => Promise<void> }) => {
+  const [form, setForm] = useState({ name: device.name, type: device.type, fixedIp: device.fixedIp || '', responsible: device.responsible || '', department: device.department || '', notes: device.notes || '' });
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    setForm({ name: device.name, type: device.type, fixedIp: device.fixedIp || '', responsible: device.responsible || '', department: device.department || '', notes: device.notes || '' });
+    setSaved(false);
+  }, [device.id, device.name, device.type, device.fixedIp, device.responsible, device.department, device.notes]);
+  const update = (changes: Partial<typeof form>) => setForm((current) => ({ ...current, ...changes }));
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setSaving(true);
+    setSaved(false);
+    try {
+      await onSave({ key: deviceIdentityKey(device), ...form, updatedAt: new Date().toISOString() });
+      setSaved(true);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <form onSubmit={submit} className="panel-surface rounded-2xl p-6">
+      <div className="mb-5"><h3 className="text-lg font-semibold">Cadastro do equipamento</h3><p className="mt-1 text-xs text-black/45">Informações manuais são preservadas entre varreduras pelo MAC ou, quando ausente, pelo IP.</p></div>
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <RegistrationField label="Nome"><input value={form.name} onChange={(event) => update({ name: event.target.value })} required /></RegistrationField>
+        <RegistrationField label="Tipo"><select value={form.type} onChange={(event) => update({ type: event.target.value as Device['type'] })}>{['router','switch','ap','workstation','server','camera','printer','iot','unknown'].map((type) => <option key={type} value={type}>{deviceTypeLabel(type as Device['type'])}</option>)}</select></RegistrationField>
+        <RegistrationField label="IP fixo"><input value={form.fixedIp} onChange={(event) => update({ fixedIp: event.target.value })} placeholder="Ex.: 10.1.1.199" /></RegistrationField>
+        <RegistrationField label="Responsável"><input value={form.responsible} onChange={(event) => update({ responsible: event.target.value })} placeholder="Nome ou equipe" /></RegistrationField>
+        <RegistrationField label="Setor"><input value={form.department} onChange={(event) => update({ department: event.target.value })} placeholder="Ex.: Infraestrutura" /></RegistrationField>
+        <RegistrationField label="Observações" wide><textarea value={form.notes} onChange={(event) => update({ notes: event.target.value })} rows={2} placeholder="Função, localização ou informação importante" /></RegistrationField>
+      </div>
+      <div className="mt-5 flex items-center justify-end gap-3">{saved && <span className="text-xs font-semibold text-green-700">Cadastro salvo</span>}<button type="submit" disabled={saving} className="rounded-lg bg-scan-ink px-4 py-2.5 text-xs font-bold uppercase tracking-wider text-white hover:bg-scan-accent disabled:opacity-50">{saving ? 'Salvando...' : 'Salvar cadastro'}</button></div>
+    </form>
+  );
+};
+
+const RegistrationField = ({ label, wide, children }: { label: string; wide?: boolean; children: React.ReactElement<{ className?: string }> }) => (
+  <label className={`grid gap-1.5 text-xs font-bold text-black/55 ${wide ? 'md:col-span-2 xl:col-span-3' : ''}`}>
+    {label}
+    {React.cloneElement(children, { className: `${children.props.className || ''} rounded-lg border border-scan-line bg-white px-3 py-2.5 text-sm font-normal text-scan-ink outline-none focus:border-scan-accent` })}
+  </label>
+);
+
 const DeviceDetails = ({
   device,
   diagnostic,
@@ -2207,7 +2380,13 @@ const DeviceDetails = ({
             <DetailItem label="Discovery Source" value={device.source || 'native'} />
             <DetailItem label="OS Intelligence" value={device.os || 'Undetected'} />
             <DetailItem label="Topology Link" value={device.parentId || 'Inbound'} />
+            <DetailItem label="IP fixo cadastrado" value={device.fixedIp || 'Nao cadastrado'} />
+            <DetailItem label="Responsavel" value={device.responsible || 'Nao cadastrado'} />
+            <DetailItem label="Setor" value={device.department || 'Nao cadastrado'} />
+            <DetailItem label="Origem da identidade" value={device.identitySource === 'manual' ? 'Informado manualmente' : device.confidence === 'high' ? 'Detectado' : 'Inferido'} />
           </div>
+
+          {device.notes && <div className="rounded-xl border border-scan-line bg-amber-50/60 p-4"><p className="text-[10px] font-bold uppercase tracking-wider text-black/40">Observacoes cadastradas</p><p className="mt-2 text-sm leading-6 text-black/65">{device.notes}</p></div>}
 
           <div className="h-px bg-scan-line" />
 
