@@ -67,7 +67,24 @@ export interface ScanProgressEvent {
   stage: string;
   message: string;
   timestamp: string;
-  result?: ScanResult;
+  changes?: {
+    deviceCount: number;
+    onlineCount: number;
+    collectors: Array<Pick<CollectorRun, "id" | "status" | "items" | "message">>;
+  };
+}
+
+export function buildProgressChanges(devices: Device[], collectors: CollectorRun[]): NonNullable<ScanProgressEvent["changes"]> {
+  return {
+    deviceCount: devices.length,
+    onlineCount: devices.filter((device) => device.status === "online").length,
+    collectors: collectors.map(({ id, status, items, message }) => ({ id, status, items, message })),
+  };
+}
+
+export function partialCollectorStatus(attempted: number, succeeded: number): CollectorRun["status"] {
+  if (attempted <= 0) return "skipped";
+  return succeeded > 0 ? "completed" : "failed";
 }
 
 export async function getToolCapabilities(): Promise<ToolCapability[]> {
@@ -187,19 +204,18 @@ export async function scanNetwork(options: ScanOptions): Promise<ScanResult> {
     "A topologia fisica sera mais precisa quando houver LLDP/CDP, tabela MAC e ARP coletadas dos equipamentos de camada 2/3.",
   ];
 
-  const emit = (type: ScanProgressEvent["type"], stage: string, message: string, result?: ScanResult) => {
+  const emit = (type: ScanProgressEvent["type"], stage: string, message: string, changes?: ScanProgressEvent["changes"]) => {
     options.onProgress?.({
       type,
       stage,
       message,
       timestamp: new Date().toISOString(),
-      result,
+      changes,
     });
   };
 
   const snapshot = (stage: string, message: string) => {
-    inferTopology(devices);
-    emit("snapshot", stage, message, buildResult(primaryTarget, devices, notes, collectors, tools, context));
+    emit("snapshot", stage, message, buildProgressChanges(devices, collectors));
   };
 
   emit("stage", "setup", `Escopo normalizado: ${primaryTarget}`);
@@ -265,7 +281,7 @@ export async function scanNetwork(options: ScanOptions): Promise<ScanResult> {
 
       finishCollector(
         nmapCollector,
-        successfulSteps > 0 ? "completed" : "failed",
+        partialCollectorStatus(attemptedSteps, successfulSteps),
         nmapResult.devices.length,
         successfulSteps > 0 ? message : nmapResult.warnings[0] || "Nmap nao concluiu nenhum lote.",
       );
@@ -368,7 +384,7 @@ export async function scanNetwork(options: ScanOptions): Promise<ScanResult> {
   options.signal?.throwIfAborted();
 
   const finalResult = buildResult(primaryTarget, devices, notes, collectors, tools, context);
-  emit("snapshot", "done", "Varredura finalizada.", finalResult);
+  emit("stage", "done", "Varredura finalizada; enviando resultado consolidado.");
   return finalResult;
 }
 

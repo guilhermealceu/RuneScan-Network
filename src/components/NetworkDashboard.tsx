@@ -1,21 +1,10 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence, animate, useMotionValue, useTransform } from 'motion/react';
-import {
-  ReactFlow,
-  Background,
-  Controls,
-  Handle,
-  Position,
-  getNodesBounds,
-  getViewportForBounds,
-  type Edge,
-  type Node,
-  type NodeProps,
-  type ReactFlowInstance,
-} from '@xyflow/react';
+import type { Edge, Node, NodeProps, Position as FlowPosition, ReactFlowInstance } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { CollectorRun, Device, LocalNetworkContext, ScanResult, ToolCapability } from '../types';
 import { NetworkTree } from './NetworkTree';
+import { clearInventoryCache, loadLatestInventory, saveInventory } from '../storage/inventory-cache';
 import {
   Activity,
   AlertTriangle,
@@ -49,7 +38,13 @@ import {
   Video,
   Zap,
 } from 'lucide-react';
-import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip as ChartTooltip, LineChart, Line, AreaChart, Area, XAxis, YAxis } from 'recharts';
+
+const RiskDistributionChart = lazy(() => import('./InsightCharts').then((module) => ({ default: module.RiskDistributionChart })));
+const NetworkDensityChart = lazy(() => import('./InsightCharts').then((module) => ({ default: module.NetworkDensityChart })));
+const ReactFlow = lazy(() => import('@xyflow/react').then((module) => ({ default: module.ReactFlow })));
+const Background = lazy(() => import('@xyflow/react').then((module) => ({ default: module.Background })));
+const Controls = lazy(() => import('@xyflow/react').then((module) => ({ default: module.Controls })));
+const Handle = lazy(() => import('@xyflow/react').then((module) => ({ default: module.Handle })));
 
 interface AppConfig {
   defaultCidr: string;
@@ -65,7 +60,11 @@ interface ScanProgressEvent {
   stage: string;
   message: string;
   timestamp: string;
-  result?: ScanResult;
+  changes?: {
+    deviceCount: number;
+    onlineCount: number;
+    collectors: Array<Pick<CollectorRun, 'id' | 'status' | 'items' | 'message'>>;
+  };
 }
 
 interface DiagnosticResult {
@@ -73,8 +72,6 @@ interface DiagnosticResult {
   rows: Record<string, string>[];
   error?: string;
 }
-
-const STORAGE_KEY = 'runescan:last-result';
 
 export const NetworkDashboard: React.FC = () => {
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
@@ -105,9 +102,22 @@ export const NetworkDashboard: React.FC = () => {
   const eventSourceRef = useRef<EventSource | null>(null);
   const detailsRef = useRef<HTMLDivElement | null>(null);
   const previousScanRef = useRef<ScanResult | null>(null);
+  const skipNextPersistRef = useRef(false);
 
   const tools = scanResult?.tools || config?.tools || [];
   const localContext = scanResult?.localContext || config?.localContext;
+  const displayCollectors = useMemo(() => {
+    const changes = progress.find((event) => event.changes)?.changes;
+    if (!loading || !changes) return scanResult?.collectors || [];
+    return changes.collectors.map((collector) => {
+      const previous = scanResult?.collectors.find((item) => item.id === collector.id);
+      return {
+        ...collector,
+        name: previous?.name || collector.id,
+        source: previous?.source || 'native',
+      } as CollectorRun;
+    });
+  }, [loading, progress, scanResult]);
 
   const devicesByRisk = useMemo(() => {
     const devices = scanResult?.devices || [];
@@ -147,9 +157,6 @@ export const NetworkDashboard: React.FC = () => {
       const payload = JSON.parse(event.data) as ScanProgressEvent;
       setCurrentStage(payload.stage);
       setProgress((items) => [payload, ...items].slice(0, 12));
-      if (payload.result) {
-        setScanResult(payload.result);
-      }
     });
 
     source.addEventListener('done', (event) => {
@@ -201,7 +208,7 @@ export const NetworkDashboard: React.FC = () => {
     eventSourceRef.current?.close();
     eventSourceRef.current = null;
     previousScanRef.current = null;
-    window.localStorage.removeItem(STORAGE_KEY);
+    void clearInventoryCache();
     setScanResult(null);
     setSelectedDevice(null);
     setAiAnalysis(null);
@@ -241,7 +248,7 @@ export const NetworkDashboard: React.FC = () => {
     setProgress((items) => [{
       type: 'stage',
       stage: 'stop',
-      message: 'Cancelamento solicitado ao servidor. O ultimo snapshot foi preservado.',
+      message: 'Cancelamento solicitado ao servidor. O ultimo inventario concluido foi preservado.',
       timestamp: new Date().toISOString(),
     }, ...items].slice(0, 12));
   };
@@ -324,14 +331,13 @@ export const NetworkDashboard: React.FC = () => {
   };
 
   useEffect(() => {
-    const cached = window.localStorage.getItem(STORAGE_KEY);
-    if (cached) {
-      try {
-        setScanResult(JSON.parse(cached) as ScanResult);
-      } catch {
-        window.localStorage.removeItem(STORAGE_KEY);
+    let active = true;
+    void loadLatestInventory().then((cached) => {
+      if (active && cached) {
+        skipNextPersistRef.current = true;
+        setScanResult(cached);
       }
-    }
+    }).catch(() => undefined);
 
     fetch('/api/config')
       .then((response) => response.json())
@@ -340,12 +346,21 @@ export const NetworkDashboard: React.FC = () => {
         setTarget(data.defaultScope || data.defaultCidr);
       })
       .catch(() => undefined);
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {
-    if (scanResult) {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(scanResult));
+    if (!scanResult) return;
+    if (skipNextPersistRef.current) {
+      skipNextPersistRef.current = false;
+      return;
     }
+    const timer = window.setTimeout(() => {
+      void saveInventory(scanResult);
+    }, 1500);
+    return () => window.clearTimeout(timer);
   }, [scanResult]);
 
   useEffect(() => {
@@ -522,7 +537,7 @@ export const NetworkDashboard: React.FC = () => {
                 loading={loading}
                 currentStage={currentStage}
                 progress={progress}
-                collectors={scanResult?.collectors || []}
+                collectors={displayCollectors}
                 onOpen={() => setCollectorsOpen(true)}
               />
             )}
@@ -644,7 +659,7 @@ export const NetworkDashboard: React.FC = () => {
       <ToolsModal open={toolsOpen} tools={tools} onClose={() => setToolsOpen(false)} />
       <CollectorsModal
         open={collectorsOpen}
-        collectors={scanResult?.collectors || []}
+        collectors={displayCollectors}
         localContext={localContext}
         progress={progress}
         onClose={() => setCollectorsOpen(false)}
@@ -1477,35 +1492,9 @@ const InsightMetrics = ({ result }: { result: ScanResult }) => {
           <ShieldAlert className="h-4 w-4 text-black/20" />
         </div>
         <div className="h-56">
-          <ResponsiveContainer width="100%" height="100%">
-            <PieChart>
-              <Pie 
-                data={riskData.length ? riskData : [{ name: 'Empty', value: 1, color: '#f8fafc' }]} 
-                dataKey="value" 
-                innerRadius={65} 
-                outerRadius={95} 
-                paddingAngle={8}
-                cornerRadius={12}
-                stroke="none"
-              >
-                {(riskData.length ? riskData : [{ color: '#f1f5f9' }]).map((entry, index) => (
-                  <Cell key={`cell-${index}`} fill={entry.color} className="outline-none" />
-                ))}
-              </Pie>
-              <ChartTooltip 
-                content={({ active, payload }) => {
-                  if (active && payload && payload.length) {
-                    return (
-                      <div className="rounded-2xl border border-black/5 bg-white/95 p-4 text-[12px] font-black shadow-2xl backdrop-blur-md">
-                        <span style={{ color: payload[0].payload.color }}>{payload[0].name}: {payload[0].value} NODES</span>
-                      </div>
-                    );
-                  }
-                  return null;
-                }}
-              />
-            </PieChart>
-          </ResponsiveContainer>
+          <Suspense fallback={<ChartSkeleton />}>
+            <RiskDistributionChart data={riskData} />
+          </Suspense>
         </div>
       </motion.div>
 
@@ -1519,40 +1508,9 @@ const InsightMetrics = ({ result }: { result: ScanResult }) => {
           <Activity className="h-4 w-4 text-black/20" />
         </div>
         <div className="h-56">
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={subnetData} margin={{ top: 20, right: 20, left: 0, bottom: 0 }}>
-              <defs>
-                <linearGradient id="colorAtivos" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#ef4444" stopOpacity={0.4}/>
-                  <stop offset="95%" stopColor="#ef4444" stopOpacity={0}/>
-                </linearGradient>
-              </defs>
-              <XAxis dataKey="label" hide />
-              <YAxis hide />
-              <ChartTooltip 
-                content={({ active, payload }) => {
-                  if (active && payload && payload.length) {
-                    return (
-                      <div className="rounded-2xl border border-black/5 bg-white/95 p-4 text-[12px] font-black shadow-2xl backdrop-blur-md">
-                        <p className="text-black/40 uppercase text-[9px] mb-1 font-black tracking-widest">{payload[0].payload.name}</p>
-                        <p className="text-scan-ink">{payload[0].value} ACTIVE DEVICES</p>
-                      </div>
-                    );
-                  }
-                  return null;
-                }}
-              />
-              <Area 
-                type="monotone" 
-                dataKey="ativos" 
-                stroke="#171717"
-                strokeWidth={4} 
-                fillOpacity={1} 
-                fill="url(#colorAtivos)" 
-                activeDot={{ r: 8, strokeWidth: 0, fill: '#ef4444' }}
-              />
-            </AreaChart>
-          </ResponsiveContainer>
+          <Suspense fallback={<ChartSkeleton />}>
+            <NetworkDensityChart data={subnetData} />
+          </Suspense>
         </div>
       </motion.div>
 
@@ -1565,6 +1523,8 @@ const InsightMetrics = ({ result }: { result: ScanResult }) => {
     </div>
   );
 };
+
+const ChartSkeleton = () => <div className="h-full w-full animate-pulse rounded-2xl bg-black/[0.04]" aria-label="Carregando grafico" />;
 
 const MetricPill = ({ label, value, tone, icon: Icon }: { label: string; value: number; tone: 'red' | 'blue' | 'gray'; icon: any }) => {
   const colors = {
@@ -1617,8 +1577,10 @@ const flowNodeTypes = {
         animate={{ scale: 1, opacity: 1 }}
         className={`min-w-44 overflow-hidden rounded-2xl border bg-white/95 shadow-2xl backdrop-blur-md transition-all hover:ring-2 hover:ring-scan-accent/20 ${flowNodeClass(node)}`}
       >
-        <Handle type="target" position={Position.Left} className="!h-2.5 !w-2.5 !border-none !bg-black/20" />
-        <Handle type="source" position={Position.Right} className="!h-2.5 !w-2.5 !border-none !bg-black/20" />
+        <Suspense fallback={null}>
+          <Handle type="target" position={'left' as FlowPosition} className="!h-2.5 !w-2.5 !border-none !bg-black/20" />
+          <Handle type="source" position={'right' as FlowPosition} className="!h-2.5 !w-2.5 !border-none !bg-black/20" />
+        </Suspense>
         
         <div className={`h-1.5 w-full ${node.kind === 'root' ? 'bg-scan-ink' : node.risk === 'high' ? 'bg-red-500' : node.risk === 'medium' ? 'bg-orange-500' : 'bg-green-500'}`} />
         
@@ -1658,6 +1620,7 @@ const FlowNetworkMap = ({ result, onSelectDevice }: { result: ScanResult; onSele
 
     try {
       await document.fonts?.ready;
+      const { getNodesBounds, getViewportForBounds } = await import('@xyflow/react');
       const exportNodes = instance.getNodes().map((node) => ({
         ...node,
         measured: {
@@ -1767,27 +1730,29 @@ const FlowNetworkMap = ({ result, onSelectDevice }: { result: ScanResult; onSele
       </div>
       {exportError && <p className="mb-3 text-xs font-medium text-red-600" role="alert">{exportError}</p>}
       <div ref={containerRef} className="h-[720px] overflow-hidden rounded-xl border border-scan-line bg-white/70">
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          nodeTypes={flowNodeTypes}
-          onInit={(instance) => { flowInstanceRef.current = instance; }}
-          fitView
-          fitViewOptions={{ padding: 0.12, minZoom: 0.1, maxZoom: 1 }}
-          minZoom={0.1}
-          maxZoom={1.35}
-          nodesDraggable
-          nodesConnectable={false}
-          elementsSelectable
-          onNodeClick={(_, node) => {
-            const device = (node.data as FlowNodeData).device;
-            if (device) onSelectDevice(device);
-          }}
-          proOptions={{ hideAttribution: true }}
-        >
-          <Background gap={22} size={1} color="rgba(16,20,24,0.14)" />
-          <Controls showInteractive={false} />
-        </ReactFlow>
+        <Suspense fallback={<ChartSkeleton />}>
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={flowNodeTypes}
+            onInit={(instance) => { flowInstanceRef.current = instance; }}
+            fitView
+            fitViewOptions={{ padding: 0.12, minZoom: 0.1, maxZoom: 1 }}
+            minZoom={0.1}
+            maxZoom={1.35}
+            nodesDraggable
+            nodesConnectable={false}
+            elementsSelectable
+            onNodeClick={(_, node) => {
+              const device = (node.data as FlowNodeData).device;
+              if (device) onSelectDevice(device);
+            }}
+            proOptions={{ hideAttribution: true }}
+          >
+            <Background gap={22} size={1} color="rgba(16,20,24,0.14)" />
+            <Controls showInteractive={false} />
+          </ReactFlow>
+        </Suspense>
       </div>
     </div>
   );

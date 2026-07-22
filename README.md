@@ -26,7 +26,11 @@ Quando uma varredura e iniciada, o RuneScan executa estas etapas:
 8. Junta resultados repetidos e infere o tipo provavel do equipamento.
 9. Exibe o inventario, a topologia inferida, os diagnosticos e os relatorios.
 
-As atualizacoes aparecem em tempo real no navegador. O ultimo inventario e guardado localmente no navegador para nao desaparecer ao atualizar a pagina.
+As atualizacoes aparecem em tempo real no navegador. Durante a execucao, o servidor envia somente etapa, mensagem e contagens alteradas; o inventario completo e transferido uma vez, ao final.
+
+Os inventarios concluidos sao guardados no IndexedDB do navegador, com versao de esquema e validade de 30 dias. A gravacao ocorre 1,5 segundo depois da ultima alteracao para evitar escritas repetidas. O cache antigo do `localStorage` e migrado automaticamente e o armazenamento mantem ate 25 resultados para suportar historicos maiores.
+
+Os graficos e a topologia interativa sao baixados pelo navegador somente quando a area de insights e aberta. As bibliotecas de exportacao PNG/PDF tambem sao carregadas apenas quando uma exportacao e solicitada.
 
 ### O que os resultados significam
 
@@ -299,6 +303,8 @@ Confirme tambem se `OLLAMA_MODEL` no `.env` corresponde a um modelo instalado.
 ### O navegador mostra resultado antigo
 
 Use o botao de lixeira para limpar o inventario salvo localmente e execute uma nova varredura.
+
+O botao limpa tanto o cache atual no IndexedDB quanto os formatos antigos do `localStorage`.
 
 ## Validacao e build
 
