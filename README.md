@@ -21,9 +21,10 @@ Quando uma varredura e iniciada, o RuneScan executa estas etapas:
 3. Se o Nmap estiver instalado, melhora a descoberta e identifica portas, servicos e produtos.
 4. Se habilitado, importa informacoes auxiliares do NirSoft Wireless Network Watcher.
 5. Verifica interfaces HTTP/HTTPS sem fazer login ou clicar na pagina.
-6. Confirma exposicao Telnet sem tentar autenticar.
-7. Junta resultados repetidos e infere o tipo provavel do equipamento.
-8. Exibe o inventario, a topologia inferida, os diagnosticos e os relatorios.
+6. Le o titulo, os cabecalhos e a identidade publica do certificado TLS para reconhecer interfaces conhecidas.
+7. Confirma exposicao Telnet sem tentar autenticar.
+8. Junta resultados repetidos e infere o tipo provavel do equipamento.
+9. Exibe o inventario, a topologia inferida, os diagnosticos e os relatorios.
 
 As atualizacoes aparecem em tempo real no navegador. O ultimo inventario e guardado localmente no navegador para nao desaparecer ao atualizar a pagina.
 
@@ -183,6 +184,12 @@ Selecione um dispositivo no inventario para ver:
 - Acoes para HTTP, HTTPS, RDP, SSH ou Telnet quando aplicaveis.
 - Diagnosticos DNS, ping/TCP, Windows, web e captura passiva.
 - Parecer local do Ollama, quando disponivel.
+
+### Controladoras de servidor
+
+Quando o fingerprint web esta ativado, o RuneScan reconhece interfaces de gerenciamento pelas informacoes publicas da pagina e do certificado HTTPS. Ha assinaturas para Lenovo XClarity Controller (XCC), Dell iDRAC, HPE iLO, Supermicro BMC/IPMI, OpenBMC e IBM IMM.
+
+Ao encontrar uma assinatura forte, o inventario passa a mostrar o fabricante, o nome publicado no certificado e a funcao de gerenciamento do servidor. O RuneScan nao tenta login e nao coleta credenciais.
 
 ## IPs candidatos a livres
 

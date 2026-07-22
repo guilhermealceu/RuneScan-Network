@@ -1238,7 +1238,7 @@ interface WebCandidate {
   scheme: "http" | "https";
 }
 
-interface WebProbeResult {
+export interface WebProbeResult {
   ok: boolean;
   finalUrl: string;
   status?: number;
@@ -1251,7 +1251,7 @@ interface WebProbeResult {
   error?: string;
 }
 
-type WebDiagnosticRow = Record<string, string> & {
+export type WebDiagnosticRow = Record<string, string> & {
   URL: string;
   Status: string;
   Produto: string;
@@ -1427,7 +1427,7 @@ function decodeHtml(value: string) {
     .replace(/&gt;/gi, ">");
 }
 
-function fingerprintWeb(result: WebProbeResult) {
+export function fingerprintWeb(result: WebProbeResult) {
   const text = [
     result.finalUrl,
     result.title || "",
@@ -1439,6 +1439,12 @@ function fingerprintWeb(result: WebProbeResult) {
   ].join(" ").toLowerCase();
 
   const rules: Array<{ product: string; type: string; confidence: string; needles: string[] }> = [
+    { product: "Lenovo XClarity Controller", type: "server management", confidence: "alta", needles: ["xclarity controller", "lenovo xclarity", "cn=xcc-", " xcc-"] },
+    { product: "Dell iDRAC", type: "server management", confidence: "alta", needles: ["idrac", "integrated dell remote access"] },
+    { product: "HPE iLO", type: "server management", confidence: "alta", needles: ["hpe ilo", " hp ilo", "integrated lights-out", "cn=ilo"] },
+    { product: "Supermicro BMC/IPMI", type: "server management", confidence: "alta", needles: ["supermicro", "ipmi login"] },
+    { product: "OpenBMC", type: "server management", confidence: "alta", needles: ["openbmc", "bmcweb"] },
+    { product: "IBM Integrated Management Module", type: "server management", confidence: "alta", needles: ["integrated management module", "ibm imm", "imm2"] },
     { product: "Cisco Device", type: "switch", confidence: "alta", needles: ["cisco switch", "cisco router", "cisco systems", "cisco web", "cisco ios", "cisco"] },
     { product: "FortiGate/Fortinet", type: "router/firewall", confidence: "alta", needles: ["fortigate", "fortinet", "fortiguard", "fortitoken"] },
     { product: "Aruba/Instant On", type: "wifi/ap", confidence: "alta", needles: ["aruba", "instant on", "airwave", "virtual controller"] },
@@ -1447,8 +1453,6 @@ function fingerprintWeb(result: WebProbeResult) {
     { product: "MikroTik RouterOS", type: "router", confidence: "alta", needles: ["mikrotik", "routeros", "winbox"] },
     { product: "VMware ESXi", type: "server/hypervisor", confidence: "alta", needles: ["vmware esx", "vmware esxi", "id_eesx_welcome", "esx welcome"] },
     { product: "Microsoft IIS", type: "server/web", confidence: "alta", needles: ["microsoft-iis", " iis7", "internet information services"] },
-    { product: "iDRAC", type: "server management", confidence: "alta", needles: ["idrac", "integrated dell remote access"] },
-    { product: "HP iLO", type: "server management", confidence: "alta", needles: [" hp ilo", "integrated lights-out", "hpe ilo"] },
     { product: "Zabbix", type: "monitoramento", confidence: "alta", needles: ["zabbix"] },
     { product: "Ricoh", type: "printer", confidence: "alta", needles: ["ricoh", "web image monitor"] },
     { product: "Hikvision", type: "camera", confidence: "alta", needles: ["hikvision"] },
@@ -1471,6 +1475,26 @@ function fingerprintWeb(result: WebProbeResult) {
   ].filter(Boolean);
 
   return { product: "", type: "", confidence: weakEvidence.length ? "baixa" : "", evidence: weakEvidence };
+}
+
+export function managementIdentityFromRows(rows: Array<Record<string, string>>) {
+  const text = rows.map((row) => `${row.Produto || ""} ${row.Tipo || ""} ${row.Certificado || ""}`).join(" ").toLowerCase();
+  const signatures: Array<{ needles: string[]; vendor: string; hostname: RegExp }> = [
+    { needles: ["lenovo xclarity", "xcc-"], vendor: "Lenovo", hostname: /^XCC[-_]/i },
+    { needles: ["dell idrac", "idrac"], vendor: "Dell Technologies", hostname: /^iDRAC[-_]/i },
+    { needles: ["hpe ilo", "hp ilo", "lights-out"], vendor: "Hewlett Packard Enterprise", hostname: /^(?:iLO|IL)[-_]?/i },
+    { needles: ["supermicro bmc", "supermicro", "ipmi"], vendor: "Supermicro", hostname: /^(?:BMC|SMC)[-_]/i },
+    { needles: ["openbmc", "bmcweb"], vendor: "OpenBMC", hostname: /^(?:BMC|OpenBMC)[-_]?/i },
+    { needles: ["ibm integrated management", "ibm imm", "imm2"], vendor: "IBM", hostname: /^IMM\d?[-_]/i },
+  ];
+  const signature = signatures.find((item) => item.needles.some((needle) => text.includes(needle)));
+  if (!signature) return undefined;
+
+  const certificateNames = rows
+    .map((row) => row.Certificado?.match(/(?:^|\s)CN=([^/,\s]+)/i)?.[1])
+    .filter((name): name is string => Boolean(name));
+  const name = certificateNames.find((candidate) => signature.hostname.test(candidate));
+  return { vendor: signature.vendor, name };
 }
 
 async function firstOpenGatewayPort(ip: string) {
@@ -1775,10 +1799,22 @@ async function enrichWebFingerprints(devices: Device[], signal?: AbortSignal) {
 
     device.services = mergeServices(services, []);
     device.type = strongerType(device.type, strongRows);
+    const managementIdentity = managementIdentityFromRows(strongRows);
+    const identityEvidence: string[] = [];
+    if (managementIdentity) {
+      if (device.vendor && !isPlaceholderVendor(device.vendor) && device.vendor !== managementIdentity.vendor) {
+        identityEvidence.push(`Fabricante do MAC: ${device.vendor}; interface de gerenciamento: ${managementIdentity.vendor}`);
+      }
+      device.vendor = managementIdentity.vendor;
+      if (managementIdentity.name && isGenericDeviceName(device.name, device.ip)) device.name = managementIdentity.name;
+      device.details = `Controladora de gerenciamento do servidor identificada como ${strongRows[0].Produto}`;
+    }
     device.confidence = "high";
     device.evidence = Array.from(new Set([
       ...(device.evidence || []),
       ...strongRows.map((row) => `Web fingerprint: ${row.Produto}${row.Tipo ? ` (${row.Tipo})` : ""} em ${row.URL}`),
+      ...strongRows.filter((row) => row.Certificado).map((row) => `Identidade TLS: ${row.Certificado}`),
+      ...identityEvidence,
     ]));
     return strongRows.length;
   }, signal);
@@ -1816,6 +1852,14 @@ function mergeProduct(current: string, next: string) {
   return `${current}; ${next}`;
 }
 
+function isPlaceholderVendor(vendor?: string) {
+  return !vendor || /desconhecido|unknown|generic|oui pendente/i.test(vendor);
+}
+
+function isGenericDeviceName(name: string, ip: string) {
+  return !name || name === ip || /^host-\d+$/i.test(name) || /^unknown$/i.test(name);
+}
+
 function strongerType(current: Device["type"], rows: Record<string, string>[]): Device["type"] {
   const text = rows.map((row) => `${row.Produto} ${row.Tipo}`).join(" ").toLowerCase();
   if (hasAny(text, ["fortigate", "fortinet", "pfsense", "mikrotik", "router/firewall"])) return "router";
@@ -1823,7 +1867,7 @@ function strongerType(current: Device["type"], rows: Record<string, string>[]): 
   if (hasAny(text, ["aruba", "unifi", "ubiquiti", "wifi/ap"])) return "ap";
   if (hasAny(text, ["ricoh", "printer"])) return "printer";
   if (hasAny(text, ["hikvision", "dahua", "axis", "camera"])) return "camera";
-  if (hasAny(text, ["server", "iis", "esxi", "idrac", "ilo", "zabbix"])) return "server";
+  if (hasAny(text, ["server", "iis", "esxi", "idrac", "ilo", "xclarity", "xcc-", "openbmc", "supermicro bmc", "integrated management module", "zabbix"])) return "server";
   return current;
 }
 
@@ -2083,6 +2127,12 @@ function inferType(context: { ip: string; ports: number[]; mac?: string; name?: 
     "ms-wbt-server",
     "microsoft dns",
     "epolicy orchestrator",
+    "xclarity controller",
+    "idrac",
+    "integrated lights-out",
+    "openbmc",
+    "supermicro bmc",
+    "integrated management module",
   ]);
 
   if (ip.endsWith(".1") || hasAny(text, ["router", "gateway", "firewall", "fortigate", "fortinet", "mikrotik", "pfsense", "cisco ios"])) return "router";

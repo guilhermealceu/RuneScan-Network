@@ -2593,19 +2593,16 @@ function deviceLabel(device: Device) {
 }
 
 function getWebFingerprints(device: Device) {
+  const knownProducts = [
+    'fortigate', 'microsoft iis', 'aruba', 'unifi', 'pfsense', 'mikrotik', 'vmware', 'zabbix',
+    'ricoh', 'hikvision', 'dahua', 'axis', 'xclarity', 'idrac', 'hpe ilo', 'openbmc',
+    'supermicro bmc', 'integrated management module',
+  ];
   const fromServices = (device.services || [])
-    .filter((service) => service.product && `${service.service || ''} ${service.product}`.toLowerCase().includes('fortigate')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('microsoft iis')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('aruba')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('unifi')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('pfsense')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('mikrotik')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('vmware')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('zabbix')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('ricoh')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('hikvision')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('dahua')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('axis'))
+    .filter((service) => {
+      const text = `${service.service || ''} ${service.product || ''}`.toLowerCase();
+      return Boolean(service.product) && knownProducts.some((product) => text.includes(product));
+    })
     .map((service) => `${service.port}/${service.protocol} ${service.product}`);
 
   const fromEvidence = (device.evidence || [])
