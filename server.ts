@@ -1,5 +1,5 @@
 import express from "express";
-import type { Express } from "express";
+import type { Express, Request } from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { Ollama } from "ollama";
@@ -21,6 +21,8 @@ import {
 import { getScanPolicy, isAbortError, validateCaptureDuration, validateScanTarget } from "./src/server/scan-policy";
 import { ScanBusyError, ScanManager, type ManagedScan } from "./src/server/scan-manager";
 import { AccessController, getAccessPolicy } from "./src/server/access-policy";
+import { ScanAuditLogger } from "./src/server/audit-log";
+import { createRateLimitMiddleware, FixedWindowRateLimiter, getRequestLimitPolicy } from "./src/server/rate-limit";
 
 dotenv.config();
 
@@ -40,8 +42,18 @@ async function startServer() {
   const PORT = Number(process.env.PORT || 3000);
   const accessPolicy = getAccessPolicy();
   const accessController = new AccessController(accessPolicy);
+  const requestLimits = getRequestLimitPolicy();
+  const generalRateLimit = createRateLimitMiddleware(
+    new FixedWindowRateLimiter(requestLimits.general),
+    "API",
+    (requestPath) => requestPath === "/scan/cancel",
+  );
+  const authRateLimit = createRateLimitMiddleware(new FixedWindowRateLimiter(requestLimits.auth), "autenticacao");
+  const heavyRateLimit = createRateLimitMiddleware(new FixedWindowRateLimiter(requestLimits.heavy), "operacoes pesadas");
+  const auditLogger = new ScanAuditLogger();
 
   app.use(express.json({ limit: "256kb" }));
+  app.use("/api", generalRateLimit);
 
   app.get("/api/access", (req, res) => {
     res.json({
@@ -51,7 +63,7 @@ async function startServer() {
     });
   });
 
-  app.post("/api/auth", (req, res) => {
+  app.post("/api/auth", authRateLimit, (req, res) => {
     const sessionId = accessController.createSession(req.body?.token);
     if (!sessionId) {
       res.status(401).json({ error: "Token invalido." });
@@ -79,6 +91,7 @@ async function startServer() {
       tools: await getToolCapabilities(),
       localContext: getLocalNetworkContext(),
       scanPolicy: getScanPolicy(),
+      requestLimits,
       activeScan: scanManager.snapshot(),
     });
   });
@@ -137,7 +150,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/diagnostics/passive", async (req, res) => {
+  app.get("/api/diagnostics/passive", heavyRateLimit, async (req, res) => {
     try {
       const target = String(req.query.target || "");
       if (!target) {
@@ -190,7 +203,7 @@ async function startServer() {
     res.send(buildRdpProfile(target));
   });
 
-  app.get("/api/scan", async (req, res) => {
+  app.get("/api/scan", heavyRateLimit, async (req, res) => {
     if (process.env.DISABLE_LIVE_SCAN === "true") {
       res.status(403).json({ error: "Varredura live desativada por DISABLE_LIVE_SCAN=true." });
       return;
@@ -200,6 +213,9 @@ async function startServer() {
     try {
       validateScanTarget(target);
       const scan = scanManager.begin(target);
+      const auditStartedAt = Date.now();
+      const requester = getRequester(req);
+      void auditLogger.write({ event: "started", scanId: scan.id, target, transport: "json", ...requester });
       res.on("close", () => {
         if (!res.writableEnded) scan.controller.abort();
       });
@@ -207,7 +223,27 @@ async function startServer() {
       const useNirsoft = String(req.query.useNirsoft || "true") === "true";
       const useWebFingerprint = String(req.query.useWebFingerprint || "true") === "true";
       try {
-        res.json(await scanNetwork({ target, useNmap, useNirsoft, useWebFingerprint, signal: scan.controller.signal }));
+        const result = await scanNetwork({ target, useNmap, useNirsoft, useWebFingerprint, signal: scan.controller.signal });
+        void auditLogger.write({
+          event: "completed",
+          scanId: scan.id,
+          target,
+          transport: "json",
+          durationMs: Date.now() - auditStartedAt,
+          ...requester,
+        });
+        res.json(result);
+      } catch (error) {
+        void auditLogger.write({
+          event: isAbortError(error) ? "cancelled" : "failed",
+          scanId: scan.id,
+          target,
+          transport: "json",
+          durationMs: Date.now() - auditStartedAt,
+          message: error instanceof Error ? error.message : "Falha desconhecida.",
+          ...requester,
+        });
+        throw error;
       } finally {
         scanManager.finish(scan.id);
       }
@@ -223,17 +259,26 @@ async function startServer() {
     }
   });
 
-  app.post("/api/scan/cancel", (_req, res) => {
+  app.post("/api/scan/cancel", (req, res) => {
     const active = scanManager.current();
     if (!active || active.controller.signal.aborted) {
       res.status(404).json({ error: "Nenhuma varredura ativa para cancelar." });
       return;
     }
     const cancelled = scanManager.cancel();
+    if (cancelled) {
+      void auditLogger.write({
+        event: "cancel_requested",
+        scanId: cancelled.id,
+        target: cancelled.target,
+        transport: "control",
+        ...getRequester(req),
+      });
+    }
     res.status(202).json({ message: "Cancelamento solicitado.", scan: cancelled });
   });
 
-  app.get("/api/scan/stream", async (req, res) => {
+  app.get("/api/scan/stream", heavyRateLimit, async (req, res) => {
     if (process.env.DISABLE_LIVE_SCAN === "true") {
       res.status(403).json({ error: "Varredura live desativada por DISABLE_LIVE_SCAN=true." });
       return;
@@ -249,6 +294,9 @@ async function startServer() {
       res.status(busy ? 409 : 400).json({ error: error instanceof Error ? error.message : "Alvo invalido." });
       return;
     }
+    const auditStartedAt = Date.now();
+    const requester = getRequester(req);
+    void auditLogger.write({ event: "started", scanId: scan.id, target, transport: "stream", ...requester });
 
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
@@ -285,8 +333,25 @@ async function startServer() {
         signal: scan.controller.signal,
         onProgress: (event) => send("progress", event),
       });
+      void auditLogger.write({
+        event: "completed",
+        scanId: scan.id,
+        target,
+        transport: "stream",
+        durationMs: Date.now() - auditStartedAt,
+        ...requester,
+      });
       send("done", result);
     } catch (error) {
+      void auditLogger.write({
+        event: isAbortError(error) ? "cancelled" : "failed",
+        scanId: scan.id,
+        target,
+        transport: "stream",
+        durationMs: Date.now() - auditStartedAt,
+        message: error instanceof Error ? error.message : "Falha desconhecida.",
+        ...requester,
+      });
       send(isAbortError(error) ? "cancelled" : "error", {
         message: isAbortError(error) ? "Varredura cancelada." : error instanceof Error ? error.message : "Falha ao executar varredura.",
         timestamp: new Date().toISOString(),
@@ -298,7 +363,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/ai/analyze-device", async (req, res) => {
+  app.post("/api/ai/analyze-device", heavyRateLimit, async (req, res) => {
     const { device } = req.body;
     try {
       const response = await ollama.generate({
@@ -314,7 +379,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/ai/analyze-network", async (req, res) => {
+  app.post("/api/ai/analyze-network", heavyRateLimit, async (req, res) => {
     const { result } = req.body;
     try {
       const compact = {
@@ -409,4 +474,11 @@ function listenWithFallback(
 
     tryPort(preferredPort, attempts);
   });
+}
+
+function getRequester(req: Request) {
+  return {
+    sourceIp: req.ip || req.socket.remoteAddress || "unknown",
+    userAgent: req.get("user-agent"),
+  };
 }

@@ -222,9 +222,19 @@ O relatorio e gerado no navegador e salvo na pasta de downloads do usuario.
 | `MAX_SCAN_ADDRESSES` | `4096` | Quantidade maxima de enderecos por varredura |
 | `MAX_SCAN_TARGETS` | `16` | Quantidade maxima de blocos separados por virgula/espaco |
 | `MAX_CAPTURE_SECONDS` | `20` | Duracao maxima da captura passiva |
+| `API_RATE_LIMIT` | `180` | Requisicoes gerais permitidas por IP a cada minuto |
+| `AUTH_RATE_LIMIT` | `5` | Tentativas de login permitidas por IP a cada 15 minutos |
+| `HEAVY_RATE_LIMIT` | `20` | Varreduras, capturas e analises por IA permitidas por IP a cada 10 minutos |
+| `AUDIT_LOG_PATH` | `logs/runescan-audit.jsonl` | Arquivo de auditoria das varreduras |
 | `APP_URL` | `MY_APP_URL` | URL publica opcional |
 
 O limite padrao de 4096 enderecos permite ate uma rede `/20`. Para um `/16`, divida a execucao em blocos menores ou aumente `MAX_SCAN_ADDRESSES` somente depois de avaliar o impacto na rede.
+
+### Limites e auditoria
+
+Quando um limite e atingido, a API responde com o codigo `429` e informa em quantos segundos uma nova tentativa sera aceita. O limite de operacoes pesadas e compartilhado entre varreduras, capturas passivas e pareceres por IA. O cancelamento de uma varredura ativa continua disponivel mesmo quando o limite geral foi atingido.
+
+Cada varredura valida gera registros no arquivo configurado em `AUDIT_LOG_PATH`, no formato JSON Lines. Sao registrados horario, identificador da varredura, IP de origem, navegador, escopo, duracao e resultado. Tokens, inventarios e respostas da IA nao sao gravados nesse arquivo.
 
 ## Como confirmar se as ferramentas foram reconhecidas
 
