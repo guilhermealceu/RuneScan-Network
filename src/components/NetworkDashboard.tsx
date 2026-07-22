@@ -57,6 +57,7 @@ interface AppConfig {
   liveScanEnabled: boolean;
   tools: ToolCapability[];
   localContext: LocalNetworkContext;
+  scanPolicy?: { maxAddresses: number; maxTargets: number; maxCaptureSeconds: number };
 }
 
 interface ScanProgressEvent {
@@ -168,6 +169,20 @@ export const NetworkDashboard: React.FC = () => {
       eventSourceRef.current = null;
     });
 
+    source.addEventListener('cancelled', (event) => {
+      const payload = JSON.parse(event.data) as { message?: string };
+      setCurrentStage('interrompido');
+      setProgress((items) => [{
+        type: 'stage',
+        stage: 'stop',
+        message: payload.message || 'Varredura cancelada.',
+        timestamp: new Date().toISOString(),
+      }, ...items].slice(0, 12));
+      setLoading(false);
+      source.close();
+      eventSourceRef.current = null;
+    });
+
     source.addEventListener('error', (event) => {
       if ('data' in event && typeof event.data === 'string' && event.data) {
         const payload = JSON.parse(event.data) as { message: string };
@@ -220,12 +235,13 @@ export const NetworkDashboard: React.FC = () => {
     enterWorkMode();
     eventSourceRef.current?.close();
     eventSourceRef.current = null;
+    void fetch('/api/scan/cancel', { method: 'POST', keepalive: true }).catch(() => undefined);
     setLoading(false);
     setCurrentStage('interrompido');
     setProgress((items) => [{
       type: 'stage',
       stage: 'stop',
-      message: 'Varredura interrompida no navegador. O ultimo snapshot foi preservado.',
+      message: 'Cancelamento solicitado ao servidor. O ultimo snapshot foi preservado.',
       timestamp: new Date().toISOString(),
     }, ...items].slice(0, 12));
   };

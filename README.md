@@ -204,7 +204,12 @@ O relatorio e gerado no navegador e salvo na pasta de downloads do usuario.
 | `OLLAMA_NUM_THREAD` | `4` | Threads usadas pelo Ollama |
 | `OLLAMA_KEEP_ALIVE` | `0s` | Tempo que o modelo permanece carregado apos responder |
 | `DISABLE_LIVE_SCAN` | `false` | Quando `true`, bloqueia varreduras reais pelo servidor |
+| `MAX_SCAN_ADDRESSES` | `4096` | Quantidade maxima de enderecos por varredura |
+| `MAX_SCAN_TARGETS` | `16` | Quantidade maxima de blocos separados por virgula/espaco |
+| `MAX_CAPTURE_SECONDS` | `20` | Duracao maxima da captura passiva |
 | `APP_URL` | `MY_APP_URL` | URL publica opcional |
+
+O limite padrao de 4096 enderecos permite ate uma rede `/20`. Para um `/16`, divida a execucao em blocos menores ou aumente `MAX_SCAN_ADDRESSES` somente depois de avaliar o impacto na rede.
 
 ## Como confirmar se as ferramentas foram reconhecidas
 

@@ -18,6 +18,8 @@ import {
   runWindowsDiagnostics,
   scanNetwork,
 } from "./src/server/discovery";
+import { getScanPolicy, isAbortError, validateCaptureDuration, validateScanTarget } from "./src/server/scan-policy";
+import { ScanBusyError, ScanManager, type ManagedScan } from "./src/server/scan-manager";
 
 dotenv.config();
 
@@ -29,6 +31,8 @@ const ollamaOptions = {
   temperature: 0.2,
 };
 const ollamaKeepAlive = process.env.OLLAMA_KEEP_ALIVE || "0s";
+
+const scanManager = new ScanManager();
 
 async function startServer() {
   const app = express();
@@ -43,6 +47,8 @@ async function startServer() {
       liveScanEnabled: process.env.DISABLE_LIVE_SCAN !== "true",
       tools: await getToolCapabilities(),
       localContext: getLocalNetworkContext(),
+      scanPolicy: getScanPolicy(),
+      activeScan: scanManager.snapshot(),
     });
   });
 
@@ -107,7 +113,8 @@ async function startServer() {
         res.status(400).json({ error: "Informe target." });
         return;
       }
-      res.json(await runPassiveCapture(target, Number(req.query.seconds || 10)));
+      const seconds = validateCaptureDuration(req.query.seconds || 10);
+      res.json(await runPassiveCapture(target, seconds));
     } catch (error) {
       res.status(500).json({ error: error instanceof Error ? error.message : "Falha na captura passiva." });
     }
@@ -158,22 +165,57 @@ async function startServer() {
       return;
     }
 
+    const target = String(req.query.target || getDefaultCidr());
     try {
-      const target = String(req.query.target || getDefaultCidr());
+      validateScanTarget(target);
+      const scan = scanManager.begin(target);
+      res.on("close", () => {
+        if (!res.writableEnded) scan.controller.abort();
+      });
       const useNmap = String(req.query.useNmap || "true") === "true";
       const useNirsoft = String(req.query.useNirsoft || "true") === "true";
       const useWebFingerprint = String(req.query.useWebFingerprint || "true") === "true";
-      res.json(await scanNetwork({ target, useNmap, useNirsoft, useWebFingerprint }));
+      try {
+        res.json(await scanNetwork({ target, useNmap, useNirsoft, useWebFingerprint, signal: scan.controller.signal }));
+      } finally {
+        scanManager.finish(scan.id);
+      }
     } catch (error) {
-      res.status(400).json({
+      if (isAbortError(error)) {
+        if (!res.headersSent) res.status(499).json({ error: "Varredura cancelada." });
+        return;
+      }
+      const busy = error instanceof ScanBusyError;
+      res.status(busy ? 409 : 400).json({
         error: error instanceof Error ? error.message : "Falha ao executar varredura.",
       });
     }
   });
 
+  app.post("/api/scan/cancel", (_req, res) => {
+    const active = scanManager.current();
+    if (!active || active.controller.signal.aborted) {
+      res.status(404).json({ error: "Nenhuma varredura ativa para cancelar." });
+      return;
+    }
+    const cancelled = scanManager.cancel();
+    res.status(202).json({ message: "Cancelamento solicitado.", scan: cancelled });
+  });
+
   app.get("/api/scan/stream", async (req, res) => {
     if (process.env.DISABLE_LIVE_SCAN === "true") {
       res.status(403).json({ error: "Varredura live desativada por DISABLE_LIVE_SCAN=true." });
+      return;
+    }
+
+    const target = String(req.query.target || getDefaultCidr());
+    let scan: ManagedScan;
+    try {
+      validateScanTarget(target);
+      scan = scanManager.begin(target);
+    } catch (error) {
+      const busy = error instanceof ScanBusyError;
+      res.status(busy ? 409 : 400).json({ error: error instanceof Error ? error.message : "Alvo invalido." });
       return;
     }
 
@@ -185,6 +227,7 @@ async function startServer() {
     });
 
     const send = (event: string, data: unknown) => {
+      if (res.destroyed || res.writableEnded) return;
       res.write(`event: ${event}\n`);
       res.write(`data: ${JSON.stringify(data)}\n\n`);
     };
@@ -193,31 +236,33 @@ async function startServer() {
       send("heartbeat", { timestamp: new Date().toISOString() });
     }, 15000);
 
-    req.on("close", () => {
+    res.on("close", () => {
       clearInterval(heartbeat);
+      if (!res.writableEnded) scan.controller.abort();
     });
 
     try {
-      const target = String(req.query.target || getDefaultCidr());
       const useNmap = String(req.query.useNmap || "true") === "true";
       const useNirsoft = String(req.query.useNirsoft || "true") === "true";
       const useWebFingerprint = String(req.query.useWebFingerprint || "true") === "true";
-      send("progress", { type: "stage", stage: "queued", message: "Varredura recebida pelo servidor.", timestamp: new Date().toISOString() });
+      send("progress", { type: "stage", stage: "queued", message: "Varredura recebida pelo servidor.", timestamp: new Date().toISOString(), scanId: scan.id });
       const result = await scanNetwork({
         target,
         useNmap,
         useNirsoft,
         useWebFingerprint,
+        signal: scan.controller.signal,
         onProgress: (event) => send("progress", event),
       });
       send("done", result);
     } catch (error) {
-      send("error", {
-        message: error instanceof Error ? error.message : "Falha ao executar varredura.",
+      send(isAbortError(error) ? "cancelled" : "error", {
+        message: isAbortError(error) ? "Varredura cancelada." : error instanceof Error ? error.message : "Falha ao executar varredura.",
         timestamp: new Date().toISOString(),
       });
     } finally {
       clearInterval(heartbeat);
+      scanManager.finish(scan.id);
       res.end();
     }
   });
