@@ -5,6 +5,9 @@ const TYPE_LABEL: Record<Device['type'], string> = {
   switch: 'Switch',
   ap: 'Ponto de acesso Wi-Fi',
   workstation: 'Computador',
+  notebook: 'Notebook',
+  phone: 'Celular',
+  tablet: 'Tablet',
   server: 'Servidor',
   camera: 'Camera',
   printer: 'Impressora',
@@ -17,6 +20,9 @@ const TYPE_ICON: Record<Device['type'], string> = {
   switch: '🔀',
   ap: '📡',
   workstation: '🖥️',
+  notebook: '💻',
+  phone: '📱',
+  tablet: '📱',
   server: '🗄️',
   camera: '📷',
   printer: '🖨️',
@@ -107,7 +113,7 @@ export function exportHumanHtmlReport(result: ScanResult | null, devices: Device
 ${pools ? `<div class="pools">${pools}</div>` : ''}</header>
 <section class="section"><h2>Como ler as prioridades</h2><p class="intro">A cor organiza a ordem de verificacao; ela nao e um veredito de seguranca.</p><div class="legend"><div><strong class="tag tag-high">Revisar primeiro</strong>Ha uma porta sensivel ou um servico que merece validacao humana mais rapida.</div><div><strong class="tag tag-medium">Revisar depois</strong>Ha servicos acessiveis, mas sem o mesmo sinal de prioridade.</div><div><strong class="tag tag-low">Sem alerta prioritario</strong>Nada relevante apareceu nos testes feitos. Isso nao significa “comprovadamente seguro”.</div></div></section>
 <h2 class="inventory-title">Dispositivos encontrados</h2><p class="inventory-intro">Cada equipamento aparece uma unica vez, ja ordenado por prioridade.</p><div class="table-wrap"><table><thead><tr><th>Dispositivo / Tipo</th><th>IP / Rede</th><th>Portas e servicos</th><th>Prioridade</th><th>Acao</th></tr></thead><tbody>${inventoryRows}</tbody></table></div>
-<footer>RuneScan Network Intelligence · pilgrims.dev · &copy; ${new Date().getFullYear()}</footer></main></body></html>`;
+<footer>RuneScan Network Intelligence · Rune Projects · &copy; ${new Date().getFullYear()}</footer></main></body></html>`;
 
   downloadHtml(html, `runescan-relatorio-tecnico-${exportedAt.replace(/[:.]/g, '-')}.html`);
 }

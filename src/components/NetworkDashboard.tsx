@@ -702,7 +702,7 @@ export const NetworkDashboard: React.FC = () => {
       </section>
 
       <footer className="panel-surface-subtle rounded-xl p-4 text-center text-xs font-semibold uppercase tracking-widest text-black/45">
-        Created by Pilgrims in partnership with Rune Projects
+        RuneScan Network Intelligence · Rune Projects
       </footer>
 
       <NetworkAnalysisModal
@@ -2217,7 +2217,7 @@ const DeviceRegistration = ({ device, onSave }: { device: Device; onSave: (profi
       <div className="mb-5"><h3 className="text-lg font-semibold">Cadastro do equipamento</h3><p className="mt-1 text-xs text-black/45">Informações manuais são preservadas entre varreduras pelo MAC ou, quando ausente, pelo IP.</p></div>
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         <RegistrationField label="Nome"><input value={form.name} onChange={(event) => update({ name: event.target.value })} required /></RegistrationField>
-        <RegistrationField label="Tipo"><select value={form.type} onChange={(event) => update({ type: event.target.value as Device['type'] })}>{['router','switch','ap','workstation','server','camera','printer','iot','unknown'].map((type) => <option key={type} value={type}>{deviceTypeLabel(type as Device['type'])}</option>)}</select></RegistrationField>
+        <RegistrationField label="Tipo"><select value={form.type} onChange={(event) => update({ type: event.target.value as Device['type'] })}>{['router','switch','ap','workstation','notebook','phone','tablet','server','camera','printer','iot','unknown'].map((type) => <option key={type} value={type}>{deviceTypeLabel(type as Device['type'])}</option>)}</select></RegistrationField>
         <RegistrationField label="IP fixo"><input value={form.fixedIp} onChange={(event) => update({ fixedIp: event.target.value })} placeholder="Ex.: 10.1.1.199" /></RegistrationField>
         <RegistrationField label="Responsável"><input value={form.responsible} onChange={(event) => update({ responsible: event.target.value })} placeholder="Nome ou equipe" /></RegistrationField>
         <RegistrationField label="Setor"><input value={form.department} onChange={(event) => update({ department: event.target.value })} placeholder="Ex.: Infraestrutura" /></RegistrationField>
@@ -2385,6 +2385,15 @@ const DeviceDetails = ({
             <DetailItem label="Setor" value={device.department || 'Nao cadastrado'} />
             <DetailItem label="Origem da identidade" value={device.identitySource === 'manual' ? 'Informado manualmente' : device.confidence === 'high' ? 'Detectado' : 'Inferido'} />
           </div>
+
+          {device.type === 'unknown' && (
+            <div className="rounded-xl border border-blue-200 bg-blue-50/70 p-4 text-sm leading-6 text-blue-950">
+              <p className="font-bold">Por que o tipo não foi identificado?</p>
+              <p className="mt-1 text-blue-900/75">
+                O equipamento respondeu, mas não publicou nome ou serviços suficientes para diferenciar notebook, celular ou outro dispositivo. Ative Nmap e NirSoft, use os diagnósticos DNS/Nome e Windows ou aproveite os dados do DHCP/UniFi no cadastro manual. O RuneScan mantém a correção nas próximas varreduras, preferencialmente pelo MAC.
+              </p>
+            </div>
+          )}
 
           {device.notes && <div className="rounded-xl border border-scan-line bg-amber-50/60 p-4"><p className="text-[10px] font-bold uppercase tracking-wider text-black/40">Observacoes cadastradas</p><p className="mt-2 text-sm leading-6 text-black/65">{device.notes}</p></div>}
 
@@ -2731,6 +2740,9 @@ function deviceLabel(device: Device) {
   if (device.type === 'ap') return 'AP';
   if (device.type === 'server') return 'SRV';
   if (device.type === 'workstation') return 'PC';
+  if (device.type === 'notebook') return 'NOTE';
+  if (device.type === 'phone') return 'CEL';
+  if (device.type === 'tablet') return 'TAB';
   if (device.type === 'printer') return 'PRN';
   if (device.type === 'camera') return 'CAM';
   return device.ip.split('.').at(-1) || '?';
@@ -2762,9 +2774,14 @@ function formatValue(value?: string, fallback = 'Nao informado') {
 }
 
 function deviceTypeLabel(type: Device['type']) {
+  const labels: Partial<Record<Device['type'], string>> = {
+    router: 'Roteador', switch: 'Switch', workstation: 'Computador', notebook: 'Notebook',
+    phone: 'Celular', tablet: 'Tablet', server: 'Servidor', camera: 'Câmera',
+    printer: 'Impressora', iot: 'IoT',
+  };
   if (type === 'unknown') return '?';
-  if (type === 'ap') return 'wifi/ap';
-  return type;
+  if (type === 'ap') return 'Wi-Fi / AP';
+  return labels[type] || type;
 }
 
 function riskClass(risk?: Device['riskLevel']) {

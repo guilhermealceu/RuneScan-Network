@@ -300,6 +300,16 @@ tools\nirsoft\PingInfoView.exe
 - Confira se o firewall permite ICMP, ARP ou as portas testadas.
 - Ative o Nmap para melhorar a descoberta.
 
+### O dispositivo aparece como `host-201` ou com tipo desconhecido
+
+Isso significa que o IP respondeu, mas nao forneceu evidencia suficiente para afirmar se e notebook, celular, impressora ou outro equipamento. Ping e ARP confirmam presenca; eles nao revelam a funcao do dispositivo.
+
+- Mantenha Nmap e NirSoft ativados. O RuneScan combina nome, MAC, fabricante e servicos encontrados pelos diferentes coletores.
+- Use `DNS/Nome` e `Windows Diag` nos detalhes do equipamento para procurar PTR e NetBIOS.
+- Consulte DHCP, DNS ou a controladora UniFi, que normalmente possuem o nome informado durante a concessao ou associacao Wi-Fi.
+- Cadastre nome, tipo, responsavel e setor manualmente quando a rede nao publicar esses dados. A correcao e preservada pelo MAC nas proximas varreduras.
+- Celulares e notebooks podem usar MAC privado/aleatorio. Nesse caso, o fabricante do MAC pode nao representar o fabricante real e o RuneScan evita inventar uma classificacao.
+
 ### Nmap ou TShark aparece como indisponivel
 
 - Feche e abra novamente o PowerShell apos instalar.

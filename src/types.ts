@@ -4,7 +4,7 @@ export interface Device {
   ip: string;
   mac?: string;
   vendor?: string;
-  type: 'router' | 'switch' | 'ap' | 'workstation' | 'server' | 'camera' | 'printer' | 'iot' | 'unknown';
+  type: 'router' | 'switch' | 'ap' | 'workstation' | 'notebook' | 'phone' | 'tablet' | 'server' | 'camera' | 'printer' | 'iot' | 'unknown';
   vlan: string;
   status: 'online' | 'offline';
   parentId?: string;

@@ -7,6 +7,9 @@ import {
   Network, 
   Server, 
   Monitor, 
+  Laptop,
+  Smartphone,
+  Tablet,
   Printer, 
   Wifi, 
   Camera,
@@ -32,6 +35,9 @@ const getIcon = (type: Device['type']) => {
     case 'switch': return <Activity className="w-5 h-5" />;
     case 'ap': return <Wifi className="w-5 h-5" />;
     case 'workstation': return <Monitor className="w-5 h-5" />;
+    case 'notebook': return <Laptop className="w-5 h-5" />;
+    case 'phone': return <Smartphone className="w-5 h-5" />;
+    case 'tablet': return <Tablet className="w-5 h-5" />;
     case 'server': return <Server className="w-5 h-5" />;
     case 'camera': return <Camera className="w-5 h-5" />;
     case 'printer': return <Printer className="w-5 h-5" />;
@@ -492,7 +498,7 @@ function exportLegacyHtmlReport(result: ScanResult | null, devices: Device[]) {
     ${rows}
 
     <footer>
-      RuneScan Network Intelligence • pilgrims.dev • &copy; ${new Date().getFullYear()}
+      RuneScan Network Intelligence • Rune Projects • &copy; ${new Date().getFullYear()}
     </footer>
   </div>
 </body>

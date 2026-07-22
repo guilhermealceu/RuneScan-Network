@@ -1708,7 +1708,7 @@ function splitCsvLine(line: string) {
   return values.map((value) => value.trim());
 }
 
-function mergeDevices(target: Device[], incoming: Device[]) {
+export function mergeDevices(target: Device[], incoming: Device[]) {
   const byId = new Map(target.map((device) => [device.id, device]));
   for (const device of incoming) {
     const current = byId.get(device.id);
@@ -1718,11 +1718,22 @@ function mergeDevices(target: Device[], incoming: Device[]) {
       continue;
     }
 
-    current.name = device.name || current.name;
+    const currentNameIsGeneric = isGenericDeviceName(current.name, current.ip);
+    const incomingNameIsUseful = Boolean(device.name) && !isGenericDeviceName(device.name, device.ip);
+    if (!current.name || (currentNameIsGeneric && incomingNameIsUseful)) current.name = device.name;
+    if (!current.mac && device.mac) current.mac = device.mac;
+    if (isPlaceholderVendor(current.vendor) && !isPlaceholderVendor(device.vendor)) current.vendor = device.vendor;
+    if (!current.os && device.os) current.os = device.os;
+    if (!current.fixedIp && device.fixedIp) current.fixedIp = device.fixedIp;
+    if (!current.responsible && device.responsible) current.responsible = device.responsible;
+    if (!current.department && device.department) current.department = device.department;
+    if (!current.notes && device.notes) current.notes = device.notes;
     current.openPorts = Array.from(new Set([...(current.openPorts || []), ...(device.openPorts || [])])).sort((a, b) => a - b);
     current.services = mergeServices(current.services || [], device.services || []);
-    current.source = current.source === "arp" ? "arp" : device.source;
-    current.confidence = "high";
+    if (device.source && current.source === "native") current.source = device.source;
+    current.status = current.status === "online" || device.status === "online" ? "online" : "offline";
+    current.confidence = strongerConfidence(current.confidence, device.confidence);
+    current.lastSeen = device.lastSeen || current.lastSeen;
     current.riskLevel = inferRisk(current.openPorts);
     current.type = inferType({
       ip: current.ip,
@@ -1732,9 +1743,16 @@ function mergeDevices(target: Device[], incoming: Device[]) {
       vendor: current.vendor,
       services: current.services,
     });
-    current.details = [current.details, device.details].filter(Boolean).join(" / ");
+    current.details = Array.from(new Set([current.details, device.details].filter(Boolean))).join(" / ");
     current.evidence = Array.from(new Set([...(current.evidence || []), ...(device.evidence || [])]));
   }
+}
+
+function strongerConfidence(a?: Device["confidence"], b?: Device["confidence"]): Device["confidence"] {
+  const rank = { low: 1, medium: 2, high: 3 } as const;
+  if (!a) return b || "low";
+  if (!b) return a;
+  return rank[b] > rank[a] ? b : a;
 }
 
 function mergeServices(a: ServiceProbe[], b: ServiceProbe[]) {
