@@ -39,6 +39,10 @@ const NMAP_SERVICE_CONCURRENCY = 2;
 const NMAP_SERVICE_BATCH_SIZE = 32;
 const NMAP_SERVICE_TIMEOUT_MS = 120000;
 
+function bundledToolPath(fileName: string) {
+  return path.join(process.env.RUNESCAN_TOOLS_DIR || path.join(process.cwd(), "tools", "nirsoft"), fileName);
+}
+
 interface PingResult {
   ip: string;
   online: boolean;
@@ -100,16 +104,16 @@ export async function getToolCapabilities(): Promise<ToolCapability[]> {
     commandCapability("netsh", ["interface", "show", "interface"], "windows-utility", "Netsh", "Contexto local de interfaces, WLAN e rotas no Windows."),
     commandCapability("WNetWatcher.exe", ["/?"], "windows-utility", "NirSoft Wireless Network Watcher", "Fonte auxiliar para detectar dispositivos na rede local e exportar CSV.", [
       path.join(process.cwd(), "WNetWatcher.exe"),
-      path.join(process.cwd(), "tools", "nirsoft", "WNetWatcher.exe"),
+      bundledToolPath("WNetWatcher.exe"),
       path.join(os.homedir(), "Downloads", "WNetWatcher.exe"),
     ]),
     commandCapability("DNSDataView.exe", ["/?"], "windows-utility", "NirSoft DNSDataView", "Consulta manual de registros DNS/PTR com exportacao CSV para enriquecer hosts selecionados.", [
-      path.join(process.cwd(), "tools", "nirsoft", "DNSDataView.exe"),
+      bundledToolPath("DNSDataView.exe"),
       path.join(process.cwd(), "DNSDataView.exe"),
       path.join(os.homedir(), "Downloads", "DNSDataView.exe"),
     ]),
     commandCapability("PingInfoView.exe", ["/?"], "windows-utility", "NirSoft PingInfoView", "Teste manual de ICMP/TCP ping para hosts e portas selecionadas.", [
-      path.join(process.cwd(), "tools", "nirsoft", "PingInfoView.exe"),
+      bundledToolPath("PingInfoView.exe"),
       path.join(process.cwd(), "PingInfoView.exe"),
       path.join(os.homedir(), "Downloads", "PingInfoView.exe"),
     ]),
@@ -1145,7 +1149,7 @@ export async function runDnsLookup(target: string) {
   }
 
   const command = await resolveCommand("DNSDataView.exe", [
-    path.join(process.cwd(), "tools", "nirsoft", "DNSDataView.exe"),
+    bundledToolPath("DNSDataView.exe"),
     path.join(process.cwd(), "DNSDataView.exe"),
     path.join(os.homedir(), "Downloads", "DNSDataView.exe"),
   ]);
@@ -1208,7 +1212,7 @@ export async function runPingDiagnostics(target: string, ports: number[] = []) {
   ];
 
   const command = await resolveCommand("PingInfoView.exe", [
-    path.join(process.cwd(), "tools", "nirsoft", "PingInfoView.exe"),
+    bundledToolPath("PingInfoView.exe"),
     path.join(process.cwd(), "PingInfoView.exe"),
     path.join(os.homedir(), "Downloads", "PingInfoView.exe"),
   ]);

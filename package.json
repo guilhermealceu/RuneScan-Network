@@ -1,11 +1,13 @@
 {
   "name": "react-example",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.1",
+  "main": "electron/main.cjs",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --external:vite --sourcemap --outfile=dist/server.cjs",
+    "dist:win": "npm run build && electron-builder --win nsis portable",
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
@@ -40,6 +42,22 @@
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
-    "vite": "^6.2.3"
+    "vite": "^6.2.3",
+    "electron": "^37.2.6",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.runeprojects.runescan",
+    "productName": "RuneScan Network",
+    "asar": true,
+    "directories": { "output": "artifacts-v3" },
+    "files": ["electron/**", "package.json"],
+    "extraResources": [
+      { "from": "dist", "to": "app-dist" },
+      { "from": "tools", "to": "tools" }
+    ],
+    "win": { "target": ["nsis", "portable"] },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "createDesktopShortcut": true, "createStartMenuShortcut": true, "artifactName": "RuneScan-Network-Setup-${version}-${arch}.${ext}" },
+    "portable": { "artifactName": "RuneScan-Network-Portable-${version}-${arch}.${ext}" }
   }
 }

@@ -1,6 +1,11 @@
 node_modules/
 build/
 dist/
+release/
+artifacts/
+artifacts-final/
+artifacts-v2/
+artifacts-v3/
 coverage/
 .DS_Store
 *.log

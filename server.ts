@@ -1,7 +1,6 @@
 import express from "express";
 import type { Express, Request } from "express";
 import path from "path";
-import { createServer as createViteServer } from "vite";
 import { Ollama } from "ollama";
 import dotenv from "dotenv";
 import {
@@ -412,6 +411,7 @@ async function startServer() {
   });
 
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
@@ -429,7 +429,7 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), "dist");
+    const distPath = process.env.RUNESCAN_DIST_PATH || path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
     app.get("*", (_req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
@@ -458,6 +458,7 @@ function listenWithFallback(
         if (port !== preferredPort) {
           console.log(`Porta ${preferredPort} ja estava em uso; usando ${port}.`);
         }
+        process.send?.({ type: "runescan-ready", port });
         resolve();
       });
 
