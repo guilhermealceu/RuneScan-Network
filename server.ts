@@ -89,7 +89,7 @@ async function startServer() {
       defaultScope: getDefaultScope(),
       liveScanEnabled: process.env.DISABLE_LIVE_SCAN !== "true",
       tools: await getToolCapabilities(),
-      localContext: getLocalNetworkContext(),
+      localContext: await getLocalNetworkContext(),
       scanPolicy: getScanPolicy(),
       requestLimits,
       activeScan: scanManager.snapshot(),
@@ -99,7 +99,7 @@ async function startServer() {
   app.get("/api/tools", async (_req, res) => {
     res.json({
       tools: await getToolCapabilities(),
-      localContext: getLocalNetworkContext(),
+      localContext: await getLocalNetworkContext(),
     });
   });
 

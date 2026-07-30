@@ -176,12 +176,128 @@ function getPreferredLocalInterface() {
   return physical || external.find((entry) => Number(entry.cidr.split("/")[1] || 32) <= 30) || external[0];
 }
 
-export function getLocalNetworkContext(): LocalNetworkContext {
+export async function getLocalNetworkContext(): Promise<LocalNetworkContext> {
+  const baseInterfaces = getLocalInterfaces();
+  let defaultGateway: string | undefined;
+  let activeIfIp: string | undefined;
+  let wifiInfo: { ssid?: string; signal?: string } = {};
+
+  if (os.platform() === "win32") {
+    try {
+      const { stdout: routeOut } = await execFileAsync("route", ["print", "0.0.0.0"], { timeout: 2500, windowsHide: true });
+      const routeResult = parseRoutePrintDefaultGateway(routeOut);
+      if (routeResult.gateway) defaultGateway = routeResult.gateway;
+      if (routeResult.interfaceIp) activeIfIp = routeResult.interfaceIp;
+    } catch {
+      // Ignore route failure
+    }
+
+    try {
+      const { stdout: netshConfigOut } = await execFileAsync("netsh", ["interface", "ipv4", "show", "config"], { timeout: 3000, windowsHide: true });
+      const parsedNetsh = parseNetshIpv4Config(netshConfigOut);
+
+      for (const iface of baseInterfaces) {
+        const match = parsedNetsh.find(
+          (cfg) =>
+            cfg.ip === iface.address ||
+            (cfg.name && iface.name && cfg.name.toLowerCase() === iface.name.toLowerCase())
+        );
+        if (match) {
+          if (match.gateway) iface.gateway = match.gateway;
+          if (match.dhcpEnabled !== undefined) {
+            iface.dhcpEnabled = match.dhcpEnabled;
+            iface.isStaticIp = !match.dhcpEnabled;
+          }
+        }
+      }
+    } catch {
+      // Ignore netsh failure
+    }
+
+    try {
+      const { stdout: ipconfigOut } = await execFileAsync("ipconfig", ["/all"], { timeout: 3000, windowsHide: true });
+      const parsedAdapters = parseIpconfigAll(ipconfigOut);
+
+      for (const iface of baseInterfaces) {
+        const match = parsedAdapters.find(
+          (adapter) =>
+            adapter.ip === iface.address ||
+            (adapter.mac && iface.mac && adapter.mac.replace(/[:-]/g, "").toLowerCase() === iface.mac.replace(/[:-]/g, "").toLowerCase()) ||
+            (adapter.name && iface.name && adapter.name.toLowerCase().includes(iface.name.toLowerCase()))
+        );
+        if (match) {
+          if (!iface.gateway && match.gateway) iface.gateway = match.gateway;
+          if (iface.dhcpEnabled === undefined && match.dhcpEnabled !== undefined) {
+            iface.dhcpEnabled = match.dhcpEnabled;
+            iface.isStaticIp = !match.dhcpEnabled;
+          }
+          if (match.description) iface.adapterDescription = match.description;
+          if (match.connectionType) iface.connectionType = match.connectionType;
+        }
+      }
+    } catch {
+      // Ignore ipconfig failure
+    }
+
+    try {
+      const { stdout: netshOut } = await execFileAsync("netsh", ["wlan", "show", "interfaces"], { timeout: 2500, windowsHide: true });
+      const ssidMatch = netshOut.match(/SSID\s*:\s*(.+)/i);
+      const signalMatch = netshOut.match(/Sinal\s*:\s*(.+)|Signal\s*:\s*(.+)/i);
+      wifiInfo = {
+        ssid: ssidMatch ? ssidMatch[1].trim() : undefined,
+        signal: signalMatch ? (signalMatch[1] || signalMatch[2]).trim() : undefined,
+      };
+
+      for (const iface of baseInterfaces) {
+        if (/wi-fi|wifi|sem fio/i.test(iface.name) || /wi-fi|wireless/i.test(iface.adapterDescription || "")) {
+          iface.connectionType = "wifi";
+          if (wifiInfo.ssid) iface.wifiSsid = wifiInfo.ssid;
+          if (wifiInfo.signal) iface.wifiSignal = wifiInfo.signal;
+        }
+      }
+    } catch {
+      // Ignore netsh failure
+    }
+  }
+
+  const external = baseInterfaces.filter((entry) => !entry.internal);
+  const activeInterface =
+    (activeIfIp ? external.find((e) => e.address === activeIfIp) : undefined) ||
+    external.find((e) => e.gateway && e.gateway === defaultGateway) ||
+    external.find(
+      (entry) =>
+        entry.gateway &&
+        Number(entry.cidr.split("/")[1] || 32) <= 30 &&
+        !/warp|vpn|openvpn|tap|tunnel|virtual|loopback/i.test(entry.name) &&
+        !/warp|vpn|openvpn|tap|virtual/i.test(entry.adapterDescription || "")
+    ) ||
+    external.find((entry) => entry.gateway) ||
+    external[0];
+
+  if (!defaultGateway && activeInterface?.gateway) {
+    defaultGateway = activeInterface.gateway;
+  }
+  if (activeInterface && defaultGateway && !activeInterface.gateway) {
+    activeInterface.gateway = defaultGateway;
+  }
+
+  const hasStaticIp = activeInterface ? activeInterface.isStaticIp === true : baseInterfaces.some((i) => !i.internal && i.isStaticIp);
+
+  let warning: string | undefined;
+  if (hasStaticIp && activeInterface) {
+    const connLabel = activeInterface.wifiSsid ? `Wi-Fi (${activeInterface.wifiSsid})` : activeInterface.name;
+    warning = `Atenção: O adaptador de rede "${connLabel}" está com IP FIXO (DHCP desativado). Se você alterar de rede local ou de roteador, o IP e o Gateway não serão atualizados automaticamente.`;
+  }
+
   return {
     hostname: os.hostname(),
     platform: `${os.platform()} ${os.release()}`,
-    interfaces: getLocalInterfaces(),
-    routes: [],
+    interfaces: baseInterfaces,
+    routes: defaultGateway ? [{ destination: "0.0.0.0/0", gateway: defaultGateway, interfaceAddress: activeInterface?.address }] : [],
+    defaultGateway,
+    activeInterface,
+    hasStaticIp,
+    warning,
   };
 }
 
@@ -190,7 +306,7 @@ export async function scanNetwork(options: ScanOptions): Promise<ScanResult> {
   options.signal?.throwIfAborted();
   const tools = await getToolCapabilities();
   options.signal?.throwIfAborted();
-  const context = getLocalNetworkContext();
+  const context = await getLocalNetworkContext();
   const collectors: CollectorRun[] = [];
   const targets = parseTargets(options.target);
   const primaryTarget = targets.map((target) => target.input).join(", ");
@@ -380,6 +496,8 @@ export async function scanNetwork(options: ScanOptions): Promise<ScanResult> {
       : "TShark/Wireshark CLI nao encontrado no PATH.",
   ));
 
+
+
   inferTopology(devices);
   options.signal?.throwIfAborted();
 
@@ -408,6 +526,101 @@ function getLocalInterfaces(): LocalInterface[] {
   }
 
   return result;
+}
+
+interface ParsedAdapter {
+  name: string;
+  description?: string;
+  mac?: string;
+  ip?: string;
+  gateway?: string;
+  dhcpEnabled?: boolean;
+  connectionType?: 'wifi' | 'ethernet' | 'vpn' | 'virtual' | 'other';
+}
+
+export function parseRoutePrintDefaultGateway(stdout: string): { gateway?: string; interfaceIp?: string } {
+  const route = stdout.match(/^\s*0\.0\.0\.0\s+0\.0\.0\.0\s+(\d{1,3}(?:\.\d{1,3}){3})\s+(\d{1,3}(?:\.\d{1,3}){3})\s+\d+/m);
+  return route ? { gateway: route[1], interfaceIp: route[2] } : {};
+}
+
+function parseNetshIpv4Config(stdout: string): ParsedAdapter[] {
+  const adapters: ParsedAdapter[] = [];
+  let current: ParsedAdapter | undefined;
+
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const header = line.match(/(?:configuration for interface|configura.{0,8} da interface)\s+"?(.+?)"?$/i);
+    if (header) {
+      if (current) adapters.push(current);
+      current = { name: header[1] };
+      continue;
+    }
+    if (!current) continue;
+
+    const ip = line.match(/\b(\d{1,3}(?:\.\d{1,3}){3})\b/)?.[1];
+    if (/dhcp/i.test(line) && /enabled|habilitado/i.test(line)) {
+      current.dhcpEnabled = /yes|sim/i.test(line);
+    } else if (ip && /default gateway|gateway padr/i.test(line)) {
+      current.gateway = ip;
+    } else if (ip && /ip address|endere.{0,5} ip/i.test(line)) {
+      current.ip = ip;
+    }
+  }
+  if (current) adapters.push(current);
+  return adapters;
+}
+
+function parseIpconfigAll(stdout: string): ParsedAdapter[] {
+  const adapters: ParsedAdapter[] = [];
+  const blocks = stdout.split(/\r?\n\r?\n/);
+
+  for (const block of blocks) {
+    const lines = block.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (lines.length === 0) continue;
+
+    const headerLine = lines[0];
+    if (headerLine.endsWith(":") && !/configura|configuration/i.test(headerLine)) {
+      const adapterName = headerLine.replace(/:$/, "").trim();
+      const isWifi = /wi-fi|wifi|sem fio|wireless/i.test(adapterName);
+      const isEthernet = /ethernet/i.test(adapterName);
+      const isVpn = /vpn|tap|tun|fortinet|wireguard/i.test(adapterName);
+      const isVirtual = /virtual|hyper-v|vbox|vmware/i.test(adapterName);
+
+      const currentAdapter: ParsedAdapter = {
+        name: adapterName,
+        connectionType: isVpn ? "vpn" : isVirtual ? "virtual" : isWifi ? "wifi" : isEthernet ? "ethernet" : "other",
+      };
+
+      for (const line of lines.slice(1)) {
+        if (/descri[cç][aã]o|description/i.test(line)) {
+          currentAdapter.description = line.split(":").slice(1).join(":").trim();
+        } else if (/endere[cç]o f[ií]sico|physical address/i.test(line)) {
+          currentAdapter.mac = line.split(":").slice(1).join(":").trim();
+        } else if (/dhcp habilitado|dhcp enabled/i.test(line)) {
+          const val = line.split(":").slice(1).join(":").trim().toLowerCase();
+          currentAdapter.dhcpEnabled = val.startsWith("s") || val.startsWith("y");
+        } else if (/endere[cç]o ipv4|ipv4 address/i.test(line)) {
+          const rawIp = line.split(":").slice(1).join(":").trim();
+          const ipClean = rawIp.replace(/\([^)]*\)/g, "").trim();
+          if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(ipClean)) {
+            currentAdapter.ip = ipClean;
+          }
+        } else if (/gateway padr[aã]o|default gateway/i.test(line)) {
+          const rawGw = line.split(":").slice(1).join(":").trim();
+          const gwClean = rawGw.replace(/\([^)]*\)/g, "").trim();
+          if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(gwClean)) {
+            currentAdapter.gateway = gwClean;
+          }
+        }
+      }
+
+      if (currentAdapter.ip || currentAdapter.gateway) {
+        adapters.push(currentAdapter);
+      }
+    }
+  }
+
+  return adapters;
 }
 
 function maskToCidr(address: string, netmask: string) {
@@ -441,7 +654,7 @@ function parseTargets(rawTarget: string) {
 }
 
 function parseTarget(target: string): ParsedTarget {
-  if (target.includes("/") ) return parseCidr(target);
+  if (target.includes("/")) return parseCidr(target);
   if (target.includes("-")) return parseIpRange(target);
   if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(target)) {
     validateIp(target);
@@ -1455,6 +1668,11 @@ export function fingerprintWeb(result: WebProbeResult) {
   ].join(" ").toLowerCase();
 
   const rules: Array<{ product: string; type: string; confidence: string; needles: string[] }> = [
+    { product: "FOG Project", type: "server imaging/deployment", confidence: "alta", needles: ["fog project", "/fog/management/", "estimated fog sites"] },
+    { product: "Checkmk", type: "server monitoring", confidence: "alta", needles: ["checkmk", "/cmk/", "checkmk gmbh"] },
+    { product: "Passbolt", type: "server password management", confidence: "alta", needles: ["passbolt", "/auth/login", "passbolt sa"] },
+    { product: "Xibo Digital Signage", type: "server digital signage", confidence: "alta", needles: ["xibo digital signage", "xibo signage", "xibo open source digital signage"] },
+    { product: "TP-Link (equipamento de rede)", type: "network device", confidence: "alta", needles: ["tp-link", "tplink", "tp link"] },
     { product: "Lenovo XClarity Controller", type: "server management", confidence: "alta", needles: ["xclarity controller", "lenovo xclarity", "cn=xcc-", " xcc-"] },
     { product: "Dell iDRAC", type: "server management", confidence: "alta", needles: ["idrac", "integrated dell remote access"] },
     { product: "HPE iLO", type: "server management", confidence: "alta", needles: ["hpe ilo", " hp ilo", "integrated lights-out", "cn=ilo"] },
@@ -1490,12 +1708,23 @@ export function fingerprintWeb(result: WebProbeResult) {
     result.certificate ? `cert: ${result.certificate}` : "",
   ].filter(Boolean);
 
+  if (isUsefulWebTitle(result.title)) {
+    return { product: result.title.trim(), type: "web interface", confidence: "media", evidence: [`title: ${result.title.trim()}`] };
+  }
+
   return { product: "", type: "", confidence: weakEvidence.length ? "baixa" : "", evidence: weakEvidence };
+}
+
+function isUsefulWebTitle(title?: string) {
+  const normalized = (title || "").trim().replace(/\s+/g, " ");
+  if (normalized.length < 3 || normalized.length > 90) return false;
+  return !/^(login|log in|sign in|admin(?:istration)?|welcome|home|index|dashboard|portal|loading(?: web application)?|please wait|one moment|processing|starting)$/i.test(normalized);
 }
 
 export function managementIdentityFromRows(rows: Array<Record<string, string>>) {
   const text = rows.map((row) => `${row.Produto || ""} ${row.Tipo || ""} ${row.Certificado || ""}`).join(" ").toLowerCase();
-  const signatures: Array<{ needles: string[]; vendor: string; hostname: RegExp }> = [
+  const signatures: Array<{ needles: string[]; vendor: string; hostname?: RegExp; name?: string }> = [
+    { needles: ["tp-link", "tplink", "tp link"], vendor: "TP-Link Systems Inc.", name: "TP-Link (equipamento de rede)" },
     { needles: ["lenovo xclarity", "xcc-"], vendor: "Lenovo", hostname: /^XCC[-_]/i },
     { needles: ["dell idrac", "idrac"], vendor: "Dell Technologies", hostname: /^iDRAC[-_]/i },
     { needles: ["hpe ilo", "hp ilo", "lights-out"], vendor: "Hewlett Packard Enterprise", hostname: /^(?:iLO|IL)[-_]?/i },
@@ -1509,8 +1738,20 @@ export function managementIdentityFromRows(rows: Array<Record<string, string>>) 
   const certificateNames = rows
     .map((row) => row.Certificado?.match(/(?:^|\s)CN=([^/,\s]+)/i)?.[1])
     .filter((name): name is string => Boolean(name));
-  const name = certificateNames.find((candidate) => signature.hostname.test(candidate));
+  const name = signature.hostname
+    ? certificateNames.find((candidate) => signature.hostname?.test(candidate))
+    : signature.name;
   return { vendor: signature.vendor, name };
+}
+
+function webDeviceNameFromRows(rows: Array<Record<string, string>>) {
+  const text = rows.map((row) => `${row.Produto || ""} ${row.Tipo || ""}`).join(" ").toLowerCase();
+  if (hasAny(text, ["fog project", "server imaging/deployment"])) return "FOG Project (servidor de imagens)";
+  if (hasAny(text, ["checkmk", "server monitoring"])) return "Checkmk (servidor de monitoramento)";
+  if (hasAny(text, ["passbolt", "server password management"])) return "Passbolt (gerenciador de senhas)";
+  if (hasAny(text, ["xibo digital signage", "server digital signage"])) return "Xibo Digital Signage (gerenciador de telas)";
+  if (hasAny(text, ["pfsense"])) return "pfSense (firewall)";
+  return undefined;
 }
 
 async function firstOpenGatewayPort(ip: string) {
@@ -1713,6 +1954,7 @@ export function mergeDevices(target: Device[], incoming: Device[]) {
   for (const device of incoming) {
     const current = byId.get(device.id);
     if (!current) {
+      applyDetectedIdentity(device);
       target.push(device);
       byId.set(device.id, device);
       continue;
@@ -1743,6 +1985,7 @@ export function mergeDevices(target: Device[], incoming: Device[]) {
       vendor: current.vendor,
       services: current.services,
     });
+    applyDetectedIdentity(current);
     current.details = Array.from(new Set([current.details, device.details].filter(Boolean))).join(" / ");
     current.evidence = Array.from(new Set([...(current.evidence || []), ...(device.evidence || [])]));
   }
@@ -1810,10 +2053,12 @@ async function enrichWebFingerprints(devices: Device[], signal?: AbortSignal) {
     signal?.throwIfAborted();
     const diagnostic = await runWebFingerprint(device.ip, webPorts(device));
     const strongRows = diagnostic.rows.filter(isStrongWebRow);
-    if (strongRows.length === 0) return 0;
+    const titleRows = diagnostic.rows.filter(isTitleWebRow);
+    const identifiedRows = strongRows.length > 0 ? strongRows : titleRows;
+    if (identifiedRows.length === 0) return 0;
 
     const services = device.services || [];
-    for (const row of strongRows) {
+    for (const row of identifiedRows) {
       const port = webPortFromUrl(row.URL);
       const existing = services.find((service) => service.protocol === "tcp" && service.port === port);
       const product = [row.Produto, row.Titulo && row.Titulo !== row.Produto ? row.Titulo : ""].filter(Boolean).join(" - ");
@@ -1832,25 +2077,36 @@ async function enrichWebFingerprints(devices: Device[], signal?: AbortSignal) {
     }
 
     device.services = mergeServices(services, []);
-    device.type = strongerType(device.type, strongRows);
+    if (strongRows.length > 0) device.type = strongerType(device.type, strongRows);
     const managementIdentity = managementIdentityFromRows(strongRows);
+    const webName = webDeviceNameFromRows(strongRows);
     const identityEvidence: string[] = [];
+    if (webName && canReplaceInferredDeviceName(device)) {
+      device.name = webName;
+      device.identitySource = "detected";
+      device.details = `Sistema identificado pela interface web publica: ${strongRows[0].Produto}`;
+    }
+    if (!webName && titleRows[0] && canReplaceInferredDeviceName(device)) {
+      device.name = `${titleRows[0].Titulo} (interface web)`;
+      device.identitySource = "inferred";
+      device.details = `Identidade inferida pelo titulo da interface web: ${titleRows[0].Titulo}`;
+    }
     if (managementIdentity) {
       if (device.vendor && !isPlaceholderVendor(device.vendor) && device.vendor !== managementIdentity.vendor) {
         identityEvidence.push(`Fabricante do MAC: ${device.vendor}; interface de gerenciamento: ${managementIdentity.vendor}`);
       }
       device.vendor = managementIdentity.vendor;
-      if (managementIdentity.name && isGenericDeviceName(device.name, device.ip)) device.name = managementIdentity.name;
+      if (managementIdentity.name && canReplaceInferredDeviceName(device)) device.name = managementIdentity.name;
       device.details = `Controladora de gerenciamento do servidor identificada como ${strongRows[0].Produto}`;
     }
-    device.confidence = "high";
+    device.confidence = strongRows.length > 0 ? "high" : strongerConfidence(device.confidence, "medium");
     device.evidence = Array.from(new Set([
       ...(device.evidence || []),
-      ...strongRows.map((row) => `Web fingerprint: ${row.Produto}${row.Tipo ? ` (${row.Tipo})` : ""} em ${row.URL}`),
+      ...identifiedRows.map((row) => `Web fingerprint: ${row.Produto}${row.Tipo ? ` (${row.Tipo})` : ""} em ${row.URL}`),
       ...strongRows.filter((row) => row.Certificado).map((row) => `Identidade TLS: ${row.Certificado}`),
       ...identityEvidence,
     ]));
-    return strongRows.length;
+    return identifiedRows.length;
   }, signal);
 
   return results.reduce((total, count) => total + count, 0);
@@ -1858,6 +2114,10 @@ async function enrichWebFingerprints(devices: Device[], signal?: AbortSignal) {
 
 function isStrongWebRow(row: Record<string, string>): row is WebDiagnosticRow {
   return Boolean(row.URL && row.Produto && row.Produto !== "nao confirmado" && row.Confianca === "alta");
+}
+
+function isTitleWebRow(row: Record<string, string>): row is WebDiagnosticRow {
+  return Boolean(row.URL && row.Produto && row.Tipo === "web interface" && row.Confianca === "media" && isUsefulWebTitle(row.Titulo));
 }
 
 function webPorts(device: Device) {
@@ -1894,14 +2154,38 @@ function isGenericDeviceName(name: string, ip: string) {
   return !name || name === ip || /^host-\d+$/i.test(name) || /^unknown$/i.test(name);
 }
 
+export function canReplaceInferredDeviceName(device: Pick<Device, "name" | "ip" | "identitySource">) {
+  return isGenericDeviceName(device.name, device.ip)
+    || (device.identitySource === "inferred" && /\((?:equipamento de rede|funcao nao identificada|dispositivo voip)\)$/i.test(device.name));
+}
+
+function applyDetectedIdentity(device: Device) {
+  const vendor = device.vendor || "";
+  const identity = vendorIdentity(vendor);
+  if (!identity) return;
+
+  if (isGenericDeviceName(device.name, device.ip)) device.name = identity.name;
+  if (device.type === "unknown") device.type = identity.type;
+  device.identitySource = device.identitySource || identity.source;
+}
+
+function vendorIdentity(vendor: string): { name: string; type: Device["type"]; source: NonNullable<Device["identitySource"]> } | undefined {
+  if (/\btp[-\s]?link\b/i.test(vendor)) return { name: "TP-Link (equipamento de rede)", type: "network", source: "detected" };
+  if (/ubiquiti/i.test(vendor)) return { name: "Ubiquiti (equipamento de rede)", type: "ap", source: "inferred" };
+  if (/proxmox/i.test(vendor)) return { name: "Proxmox VM (funcao nao identificada)", type: "server", source: "inferred" };
+  if (/grandstream/i.test(vendor)) return { name: "Grandstream (dispositivo VoIP)", type: "phone", source: "inferred" };
+  return undefined;
+}
+
 function strongerType(current: Device["type"], rows: Record<string, string>[]): Device["type"] {
   const text = rows.map((row) => `${row.Produto} ${row.Tipo}`).join(" ").toLowerCase();
+  if (hasAny(text, ["tp-link", "tplink", "network device"])) return "network";
   if (hasAny(text, ["fortigate", "fortinet", "pfsense", "mikrotik", "router/firewall"])) return "router";
   if (hasAny(text, ["cisco", "switch"])) return "switch";
   if (hasAny(text, ["aruba", "unifi", "ubiquiti", "wifi/ap"])) return "ap";
   if (hasAny(text, ["ricoh", "printer"])) return "printer";
   if (hasAny(text, ["hikvision", "dahua", "axis", "camera"])) return "camera";
-  if (hasAny(text, ["server", "iis", "esxi", "idrac", "ilo", "xclarity", "xcc-", "openbmc", "supermicro bmc", "integrated management module", "zabbix"])) return "server";
+  if (hasAny(text, ["server", "iis", "esxi", "idrac", "ilo", "xclarity", "xcc-", "openbmc", "supermicro bmc", "integrated management module", "zabbix", "checkmk", "fog project", "passbolt", "xibo", "imaging/deployment", "server monitoring", "server password management", "server digital signage"])) return "server";
   return current;
 }
 
@@ -2170,6 +2454,7 @@ function inferType(context: { ip: string; ports: number[]; mac?: string; name?: 
   ]);
 
   if (ip.endsWith(".1") || hasAny(text, ["router", "gateway", "firewall", "fortigate", "fortinet", "mikrotik", "pfsense", "cisco ios"])) return "router";
+  if (hasAny(text, ["tp-link", "tplink"])) return "network";
   if (hasAny(text, ["aruba", "instant on", "iap-", "ap-", "access point", "wireless ap", "ubiquiti", "unifi", "ruckus", "omada"])) return "ap";
   if (hasAny(text, ["switch", "procurve", "catalyst", "nexus", "comware", "jetstream"])) return "switch";
   if (hasAny(text, ["ricoh", "brother", "hp laserjet", "lexmark", "xerox", "epson", "printer"]) || ports.includes(515) || ports.includes(631)) return "printer";

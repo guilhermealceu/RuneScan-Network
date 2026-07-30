@@ -34,6 +34,7 @@ const getIcon = (type: Device['type']) => {
     case 'router': return <Network className="w-5 h-5" />;
     case 'switch': return <Activity className="w-5 h-5" />;
     case 'ap': return <Wifi className="w-5 h-5" />;
+    case 'network': return <Network className="w-5 h-5" />;
     case 'workstation': return <Monitor className="w-5 h-5" />;
     case 'notebook': return <Laptop className="w-5 h-5" />;
     case 'phone': return <Smartphone className="w-5 h-5" />;

@@ -3,6 +3,7 @@ import type { Device, ScanResult } from './types';
 const TYPE_LABEL: Record<Device['type'], string> = {
   router: 'Roteador',
   switch: 'Switch',
+  network: 'Equipamento de rede',
   ap: 'Ponto de acesso Wi-Fi',
   workstation: 'Computador',
   notebook: 'Notebook',
@@ -18,6 +19,7 @@ const TYPE_LABEL: Record<Device['type'], string> = {
 const TYPE_ICON: Record<Device['type'], string> = {
   router: '🌐',
   switch: '🔀',
+  network: '🌐',
   ap: '📡',
   workstation: '🖥️',
   notebook: '💻',
@@ -96,6 +98,17 @@ export function exportHumanHtmlReport(result: ScanResult | null, devices: Device
     </tr>
   `).join('');
 
+  const localCtx = result?.localContext;
+  const activeIface = localCtx?.activeInterface || localCtx?.interfaces?.find((i) => !i.internal);
+  const netContextHtml = localCtx ? `
+    <div style="background:#f8fafc;border:1px solid #dfe5eb;border-radius:12px;padding:12px 16px;margin:16px 0;font-size:12px;display:flex;flex-wrap:wrap;gap:18px;align-items:center;">
+      <div><strong>Host Local:</strong> ${escapeHtml(localCtx.hostname)}</div>
+      <div><strong>Gateway Padrão:</strong> ${escapeHtml(localCtx.defaultGateway || activeIface?.gateway || 'Não informado')}</div>
+      <div><strong>Adaptador Ativo:</strong> ${escapeHtml(activeIface?.wifiSsid ? `Wi-Fi (${activeIface.wifiSsid})` : activeIface?.name || 'Rede Local')}</div>
+      <div><strong>Modo de IP:</strong> <span style="font-weight:bold;color:${activeIface?.isStaticIp ? '#b42318' : '#067647'}">${activeIface?.isStaticIp ? '⚠️ IP FIXO (Estático)' : 'DHCP (Dinâmico)'}</span></div>
+    </div>
+  ` : '';
+
   const html = `<!doctype html>
 <html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>RuneScan | Relatorio de rede - ${escapeHtml(result?.target || 'Rede local')}</title>
@@ -107,6 +120,7 @@ export function exportHumanHtmlReport(result: ScanResult | null, devices: Device
 </style></head><body><main class="page">
 <header class="hero"><div class="brand"><div><h1>RUNESCAN</h1><p>Relatorio de descoberta e exposicao da rede</p></div><div class="meta">Gerado em ${escapeHtml(formatDate(exportedAt))}<br>Escopo: ${escapeHtml(result?.target || 'Rede local')}</div></div>
 <p class="lead"><strong>${online.length} dispositivos responderam.</strong> ${first.length} devem ser revisados primeiro, ${next.length} podem ser revisados em seguida e ${routine.length} nao apresentaram alerta prioritario nesta varredura.</p>
+${netContextHtml}
 <p class="note"><strong>Importante:</strong> o relatorio mostra sinais observados na rede. Ele nao comprova invasao, vulnerabilidade ou configuracao incorreta. Antes de bloquear um servico, confirme sua funcao com o responsavel pelo equipamento.</p>
 <div class="stats"><div class="stat"><b>${devices.length}</b><span>Encontrados</span></div><div class="stat"><b>${online.length}</b><span>Responderam</span></div><div class="stat"><b style="color:var(--red)">${first.length}</b><span>Revisar primeiro</span></div><div class="stat"><b>${web.length}</b><span>Com interface web</span></div><div class="stat"><b>${unknown.length}</b><span>Sem tipo confirmado</span></div></div>
 <div class="actions"><h2>O que fazer agora</h2><ol>${actions.map((action) => `<li>${escapeHtml(action)}</li>`).join('') || '<li>Nenhuma acao prioritaria foi gerada. Mantenha inventario e monitoramento periodicos.</li>'}</ol></div>

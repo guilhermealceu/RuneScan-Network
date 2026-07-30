@@ -4,7 +4,7 @@ export interface Device {
   ip: string;
   mac?: string;
   vendor?: string;
-  type: 'router' | 'switch' | 'ap' | 'workstation' | 'notebook' | 'phone' | 'tablet' | 'server' | 'camera' | 'printer' | 'iot' | 'unknown';
+  type: 'router' | 'switch' | 'ap' | 'network' | 'workstation' | 'notebook' | 'phone' | 'tablet' | 'server' | 'camera' | 'printer' | 'iot' | 'unknown';
   vlan: string;
   status: 'online' | 'offline';
   parentId?: string;
@@ -92,6 +92,10 @@ export interface LocalNetworkContext {
   platform: string;
   interfaces: LocalInterface[];
   routes: RouteEntry[];
+  defaultGateway?: string;
+  activeInterface?: LocalInterface;
+  hasStaticIp?: boolean;
+  warning?: string;
 }
 
 export interface LocalInterface {
@@ -101,6 +105,13 @@ export interface LocalInterface {
   cidr: string;
   mac?: string;
   internal: boolean;
+  gateway?: string;
+  dhcpEnabled?: boolean;
+  isStaticIp?: boolean;
+  connectionType?: 'wifi' | 'ethernet' | 'vpn' | 'virtual' | 'other';
+  wifiSsid?: string;
+  wifiSignal?: string;
+  adapterDescription?: string;
 }
 
 export interface RouteEntry {

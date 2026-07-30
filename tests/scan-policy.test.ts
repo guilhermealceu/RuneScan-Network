@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { isAbortError, validateCaptureDuration, validateScanTarget } from '../src/server/scan-policy';
+import { parseRoutePrintDefaultGateway } from '../src/server/discovery';
 
 const policy = { maxAddresses: 4096, maxTargets: 4, maxCaptureSeconds: 20 };
 
@@ -37,4 +38,9 @@ test('reconhece cancelamento por AbortController', () => {
   const controller = new AbortController();
   controller.abort();
   assert.equal(isAbortError(controller.signal.reason), true);
+});
+
+test('extrai gateway e IPv4 ativo da rota padrao do Windows', () => {
+  const parsed = parseRoutePrintDefaultGateway('\n          0.0.0.0          0.0.0.0         10.0.0.1        10.0.0.58     35\n');
+  assert.deepEqual(parsed, { gateway: '10.0.0.1', interfaceIp: '10.0.0.58' });
 });

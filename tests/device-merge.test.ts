@@ -45,3 +45,34 @@ test("nome generico de outro coletor nao apaga um nome real", () => {
   assert.equal(devices[0].name, "NOTE-FINANCEIRO");
   assert.equal(devices[0].confidence, "high");
 });
+
+test("fabricante TP-Link conhecido substitui o host generico por uma identidade util", () => {
+  const devices = [device({ name: "host-2", ip: "10.1.1.2" })];
+
+  mergeDevices(devices, [device({
+    name: "host-2",
+    ip: "10.1.1.2",
+    vendor: "TP-Link Systems Inc.",
+    source: "nmap",
+  })]);
+
+  assert.equal(devices[0].name, "TP-Link (equipamento de rede)");
+  assert.equal(devices[0].type, "network");
+  assert.equal(devices[0].identitySource, "detected");
+});
+
+test("promove fabricantes conhecidos sem sobrescrever um nome real", () => {
+  const cases: Array<{ vendor: string; name: string; type: Device["type"] }> = [
+    { vendor: "Ubiquiti Inc", name: "Ubiquiti (equipamento de rede)", type: "ap" },
+    { vendor: "Proxmox Server Solutions GmbH", name: "Proxmox VM (funcao nao identificada)", type: "server" },
+    { vendor: "Grandstream Networks Inc", name: "Grandstream (dispositivo VoIP)", type: "phone" },
+  ];
+
+  for (const item of cases) {
+    const devices = [device()];
+    mergeDevices(devices, [device({ vendor: item.vendor, source: "nmap" })]);
+    assert.equal(devices[0].name, item.name);
+    assert.equal(devices[0].type, item.type);
+    assert.equal(devices[0].identitySource, "inferred");
+  }
+});

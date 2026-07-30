@@ -26,6 +26,7 @@ import {
   Lock,
   Monitor,
   Network,
+  Radio,
   Sparkles,
   PlugZap,
   Radar,
@@ -112,7 +113,9 @@ export const NetworkDashboard: React.FC = () => {
   const profilesRef = useRef<DeviceProfile[]>([]);
 
   const tools = scanResult?.tools || config?.tools || [];
-  const localContext = scanResult?.localContext || config?.localContext;
+  // O cabeçalho representa a conexão atual deste computador; um inventário salvo
+  // pode carregar um contexto de rede antigo, sem gateway ou de outra rede.
+  const localContext = config?.localContext || scanResult?.localContext;
   const displayCollectors = useMemo(() => {
     const changes = progress.find((event) => event.changes)?.changes;
     if (!loading || !changes) return scanResult?.collectors || [];
@@ -596,6 +599,8 @@ export const NetworkDashboard: React.FC = () => {
         </div>
       )}
 
+      <LocalNetworkInfoBanner localContext={localContext} />
+
       <section className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
         <StatCard label="Ativos" value={scanResult?.summary.total || 0} icon={<Cpu className="h-4 w-4" />} />
         <StatCard label="Online" value={scanResult?.summary.online || 0} icon={<Zap className="h-4 w-4 text-green-600" />} />
@@ -870,6 +875,84 @@ const IconToggle = ({
     <Icon className="h-4 w-4" />
   </motion.button>
 );
+
+const LocalNetworkInfoBanner = ({ localContext }: { localContext?: LocalNetworkContext }) => {
+  if (!localContext) return null;
+
+  const active = localContext.activeInterface || localContext.interfaces?.find((i) => !i.internal);
+  const gateway = localContext.defaultGateway || active?.gateway;
+  const isStatic = active?.isStaticIp === true || localContext.hasStaticIp === true;
+
+  const connTypeLabel = active?.wifiSsid
+    ? `Wi-Fi (${active.wifiSsid}) ${active.wifiSignal ? `· ${active.wifiSignal}` : ''}`
+    : active?.connectionType === 'wifi'
+    ? 'Wi-Fi (Sem fio)'
+    : active?.connectionType === 'ethernet'
+    ? 'Cabo Ethernet'
+    : active?.connectionType === 'vpn'
+    ? 'Conexão VPN'
+    : active?.name || 'Rede Local';
+
+  return (
+    <div className="my-2 grid gap-3">
+      {localContext.warning && (
+        <div className="flex items-start gap-3 rounded-lg border border-amber-300 bg-amber-50/95 p-4 text-sm text-amber-900 shadow-sm">
+          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
+          <div className="min-w-0 flex-1">
+            <p className="font-bold text-amber-950">⚠️ Atenção: Configuração de IP Fixo (DHCP Desativado)</p>
+            <p className="mt-1 leading-5 text-amber-850">{localContext.warning}</p>
+          </div>
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-scan-line bg-white/80 p-4 shadow-sm backdrop-blur">
+        <div className="flex flex-wrap items-center gap-6">
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-scan-line bg-black/[0.03]">
+              {active?.connectionType === 'wifi' || active?.wifiSsid ? (
+                <Radio className="h-4 w-4 text-scan-accent" />
+              ) : (
+                <Network className="h-4 w-4 text-scan-accent" />
+              )}
+            </div>
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-black/40">Adaptador & Rede</p>
+              <p className="text-sm font-semibold text-scan-ink">{connTypeLabel}</p>
+            </div>
+          </div>
+
+          <div className="hidden h-8 w-px bg-scan-line sm:block" />
+
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wider text-black/40">Endereço IP Local</p>
+            <p className="font-mono text-sm font-bold text-scan-ink">{active ? `${active.address}/${active.cidr.split('/')[1] || '?'}` : 'Detectando...'}</p>
+          </div>
+
+          <div className="hidden h-8 w-px bg-scan-line sm:block" />
+
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wider text-black/40">Gateway Padrão</p>
+            <p className="font-mono text-sm font-bold text-scan-ink">{gateway || 'Não detectado'}</p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          {isStatic ? (
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-300 bg-amber-100 px-3 py-1 text-xs font-bold text-amber-900" title="DHCP Desativado - IP fixado manualmente no adaptador">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-amber-500" />
+              IP FIXO (Estático)
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-green-200 bg-green-50 px-3 py-1 text-xs font-bold text-green-700" title="DHCP Habilitado - IP atribuído dinamicamente pelo roteador/gateway">
+              <span className="h-2 w-2 rounded-full bg-green-500" />
+              DHCP (Dinâmico)
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
 
 const CollectorInlineStatus = ({
   loading,
@@ -2217,7 +2300,7 @@ const DeviceRegistration = ({ device, onSave }: { device: Device; onSave: (profi
       <div className="mb-5"><h3 className="text-lg font-semibold">Cadastro do equipamento</h3><p className="mt-1 text-xs text-black/45">Informações manuais são preservadas entre varreduras pelo MAC ou, quando ausente, pelo IP.</p></div>
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         <RegistrationField label="Nome"><input value={form.name} onChange={(event) => update({ name: event.target.value })} required /></RegistrationField>
-        <RegistrationField label="Tipo"><select value={form.type} onChange={(event) => update({ type: event.target.value as Device['type'] })}>{['router','switch','ap','workstation','notebook','phone','tablet','server','camera','printer','iot','unknown'].map((type) => <option key={type} value={type}>{deviceTypeLabel(type as Device['type'])}</option>)}</select></RegistrationField>
+        <RegistrationField label="Tipo"><select value={form.type} onChange={(event) => update({ type: event.target.value as Device['type'] })}>{['router','switch','ap','network','workstation','notebook','phone','tablet','server','camera','printer','iot','unknown'].map((type) => <option key={type} value={type}>{deviceTypeLabel(type as Device['type'])}</option>)}</select></RegistrationField>
         <RegistrationField label="IP fixo"><input value={form.fixedIp} onChange={(event) => update({ fixedIp: event.target.value })} placeholder="Ex.: 10.1.1.199" /></RegistrationField>
         <RegistrationField label="Responsável"><input value={form.responsible} onChange={(event) => update({ responsible: event.target.value })} placeholder="Nome ou equipe" /></RegistrationField>
         <RegistrationField label="Setor"><input value={form.department} onChange={(event) => update({ department: event.target.value })} placeholder="Ex.: Infraestrutura" /></RegistrationField>
@@ -2246,6 +2329,7 @@ const DeviceDetails = ({
   diagnosticLoading: string | null;
   onRunDiagnostic: (kind: 'dns' | 'ping' | 'windows' | 'passive' | 'web') => void;
 }) => {
+  const [sshModalOpen, setSshModalOpen] = useState(false);
   const actions = getDeviceActions(device);
   const riskReasons = getRiskReasons(device);
   const hasWebSurface = actions.some((action) => action.kind === 'http' || action.kind === 'https');
@@ -2297,7 +2381,7 @@ const DeviceDetails = ({
             {actions.map((action) => (
               <button
                 key={`${action.kind}-${action.port}`}
-                onClick={() => openDeviceAction(action.href)}
+                onClick={() => action.kind === 'ssh' ? setSshModalOpen(true) : openDeviceAction(action.href)}
                 className="group flex h-10 items-center justify-center gap-3 rounded-lg border border-transparent px-4 py-2 text-[10px] font-black uppercase tracking-[0.1em] transition-all hover:bg-scan-ink hover:text-white"
               >
                 <action.icon className="h-3.5 w-3.5" />
@@ -2308,6 +2392,8 @@ const DeviceDetails = ({
             {actions.length === 0 && <p className="px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-black/25">Nenhuma interface de acesso detectada</p>}
           </div>
         </div>
+
+        <SshCommandModal open={sshModalOpen} target={device.ip} onClose={() => setSshModalOpen(false)} />
 
         <div className="mb-8 grid gap-1 grid-cols-2 md:grid-cols-3 lg:grid-cols-5">
           <button
@@ -2535,6 +2621,51 @@ const NetworkAnalysisModal = ({
     )}
   </AnimatePresence>
 );
+
+const SshCommandModal = ({ open, target, onClose }: { open: boolean; target: string; onClose: () => void }) => {
+  const [username, setUsername] = useState('');
+  const [port, setPort] = useState('22');
+  const [copied, setCopied] = useState(false);
+  const safeUsername = username.trim().replace(/[^a-zA-Z0-9_.-]/g, '');
+  const parsedPort = Number(port);
+  const safePort = Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535 ? parsedPort : 22;
+  const command = `ssh${safePort === 22 ? '' : ` -p ${safePort}`}${safeUsername ? ` ${safeUsername}@` : ' '} ${target}`.replace(/\s+/g, ' ').trim();
+
+  useEffect(() => {
+    if (!open) {
+      setCopied(false);
+      setUsername('');
+      setPort('22');
+    }
+  }, [open]);
+
+  const copyCommand = async () => {
+    await navigator.clipboard.writeText(command);
+    setCopied(true);
+    window.setTimeout(onClose, 650);
+  };
+
+  return (
+    <AnimatePresence>
+      {open && (
+        <motion.div className="fixed inset-0 z-50 flex items-center justify-center bg-scan-ink/45 p-4 backdrop-blur-sm" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={onClose}>
+          <motion.div role="dialog" aria-modal="true" aria-label="Preparar comando SSH" className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl" initial={{ opacity: 0, scale: 0.96, y: 10 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.96, y: 10 }} onMouseDown={(event) => event.stopPropagation()}>
+            <div className="flex items-start justify-between gap-4">
+              <div><h3 className="text-lg font-bold text-scan-ink">Conectar por SSH</h3><p className="mt-1 text-xs leading-5 text-black/50">A senha será solicitada somente no terminal e não é salva aqui.</p></div>
+              <button type="button" onClick={onClose} className="rounded-lg p-2 text-black/40 hover:bg-black/5 hover:text-scan-ink" aria-label="Fechar">×</button>
+            </div>
+            <div className="mt-5 grid gap-4 sm:grid-cols-[minmax(0,1fr)_110px]">
+              <label className="grid min-w-0 gap-1.5 text-xs font-bold text-black/55">Usuário<input autoFocus value={username} onChange={(event) => setUsername(event.target.value)} placeholder="Ex.: administrador" className="box-border w-full min-w-0 rounded-lg border border-scan-line px-3 py-2.5 text-sm font-normal outline-none focus:border-scan-accent" /></label>
+              <label className="grid min-w-0 gap-1.5 text-xs font-bold text-black/55">Porta<input inputMode="numeric" value={port} onChange={(event) => setPort(event.target.value)} className="box-border w-full min-w-0 rounded-lg border border-scan-line px-3 py-2.5 text-sm font-normal outline-none focus:border-scan-accent" /></label>
+            </div>
+            <div className="mt-5 rounded-xl border border-scan-line bg-black/[0.03] p-3"><p className="text-[9px] font-black uppercase tracking-widest text-black/35">Comando</p><code className="mt-1 block break-all font-mono text-sm font-bold text-scan-ink">{command}</code></div>
+            <button type="button" onClick={() => void copyCommand()} className="mt-5 flex w-full items-center justify-center gap-2 rounded-lg bg-scan-ink px-4 py-3 text-xs font-bold uppercase tracking-wider text-white transition hover:bg-scan-accent"><ClipboardCopy className="h-4 w-4" />{copied ? 'Copiado' : 'Copiar comando'}</button>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+};
 
 const DetailItem = ({ label, value }: { label: string; value: string }) => (
   <div className="min-w-0">
@@ -2775,7 +2906,7 @@ function formatValue(value?: string, fallback = 'Nao informado') {
 
 function deviceTypeLabel(type: Device['type']) {
   const labels: Partial<Record<Device['type'], string>> = {
-    router: 'Roteador', switch: 'Switch', workstation: 'Computador', notebook: 'Notebook',
+    router: 'Roteador', switch: 'Switch', network: 'Equipamento de rede', workstation: 'Computador', notebook: 'Notebook',
     phone: 'Celular', tablet: 'Tablet', server: 'Servidor', camera: 'Câmera',
     printer: 'Impressora', iot: 'IoT',
   };
