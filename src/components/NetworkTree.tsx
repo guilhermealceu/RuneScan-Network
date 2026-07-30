@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import { motion } from 'motion/react';
 import { Device, ScanResult } from '../types';
+import { buildHumanActionItems, exportHumanHtmlReport } from '../report';
 import { 
   Network, 
   Server, 
@@ -134,7 +135,7 @@ export const NetworkTree: React.FC<NetworkTreeProps> = ({ result, devices, onSel
           </button>
           <button
             type="button"
-            onClick={() => exportHtmlReport(result, devices)}
+            onClick={() => exportHumanHtmlReport(result, devices)}
             disabled={!devices.length}
             className="flex h-8 w-8 items-center justify-center rounded-md border border-white/10 text-white/70 transition hover:bg-white hover:text-scan-ink disabled:cursor-not-allowed disabled:opacity-30"
             title="Exportar relatorio HTML executivo"
@@ -167,10 +168,23 @@ export const NetworkTree: React.FC<NetworkTreeProps> = ({ result, devices, onSel
 function exportScanReport(result: ScanResult | null, devices: Device[]) {
   if (!devices.length) return;
   const timestamp = new Date().toISOString();
+  const online = devices.filter((device) => device.status === 'online');
+  const reviewFirst = online.filter((device) => device.riskLevel === 'high');
+  const reviewNext = online.filter((device) => device.riskLevel === 'medium');
   const payload = {
     schema: 'runescan-network-report/v1',
     exportedAt: timestamp,
-    purpose: 'Detailed RuneScan Network export for technical validation and assistant review.',
+    purpose: 'Exportacao detalhada do RuneScan para validacao tecnica, auditoria e revisao assistida.',
+    humanSummary: {
+      headline: `${online.length} dispositivos responderam; ${reviewFirst.length} devem ser revisados primeiro e ${reviewNext.length} depois.`,
+      importantNote: 'A prioridade indica exposicao observada, nao comprova vulnerabilidade, invasao ou configuracao incorreta.',
+      priorities: buildHumanActionItems(online),
+      readingGuide: {
+        high: 'Revisar primeiro: ha uma porta sensivel ou um servico que merece validacao humana.',
+        medium: 'Revisar depois: ha exposicao, mas sem o mesmo sinal de prioridade.',
+        low: 'Sem alerta prioritario nesta varredura; isso nao equivale a equipamento comprovadamente seguro.',
+      },
+    },
     scan: result ? {
       timestamp: result.timestamp,
       mode: result.mode,
@@ -209,7 +223,7 @@ function exportScanReport(result: ScanResult | null, devices: Device[]) {
   downloadTextFile(JSON.stringify(payload, null, 2), `runescan-report-${timestamp.replace(/[:.]/g, '-')}.json`, 'application/json');
 }
 
-function exportHtmlReport(result: ScanResult | null, devices: Device[]) {
+function exportLegacyHtmlReport(result: ScanResult | null, devices: Device[]) {
   if (!devices.length) return;
   const timestamp = new Date().toISOString();
   const online = devices.filter((device) => device.status === 'online');

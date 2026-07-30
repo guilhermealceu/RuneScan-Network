@@ -31,7 +31,12 @@ const WEB_FINGERPRINT_TIMEOUT_MS = 4500;
 const PING_CONCURRENCY = 48;
 const PORT_CONCURRENCY = 24;
 const SERVICE_SCAN_HOST_LIMIT = 512;
-const WNETWATCHER_TIMEOUT_MS = 60000;
+const WNETWATCHER_TIMEOUT_MS = 120000;
+const NMAP_DISCOVERY_CONCURRENCY = 2;
+const NMAP_DISCOVERY_TIMEOUT_MS = 75000;
+const NMAP_SERVICE_CONCURRENCY = 2;
+const NMAP_SERVICE_BATCH_SIZE = 32;
+const NMAP_SERVICE_TIMEOUT_MS = 120000;
 
 interface PingResult {
   ip: string;
@@ -64,7 +69,7 @@ export interface ScanProgressEvent {
 }
 
 export async function getToolCapabilities(): Promise<ToolCapability[]> {
-  const [nmap, tshark, netsh, nirsoft, dnsDataView, pingInfoView] = await Promise.all([
+  const [nmap, tshark, netsh, nirsoft, dnsDataView, pingInfoView, ollama] = await Promise.all([
     commandCapability("nmap", ["--version"], "active-scan", "Nmap", "Varredura ativa, ping sweep, fingerprint de servicos e exportacao estruturada.", [
       "C:\\Program Files\\Nmap\\nmap.exe",
       "C:\\Program Files (x86)\\Nmap\\nmap.exe",
@@ -89,6 +94,7 @@ export async function getToolCapabilities(): Promise<ToolCapability[]> {
       path.join(process.cwd(), "PingInfoView.exe"),
       path.join(os.homedir(), "Downloads", "PingInfoView.exe"),
     ]),
+    commandCapability("ollama", ["--version"], "ai", "Ollama", "Analise local dos ativos e da rede sem enviar o inventario para um servico externo."),
   ]);
 
   return [
@@ -105,6 +111,7 @@ export async function getToolCapabilities(): Promise<ToolCapability[]> {
     nirsoft,
     dnsDataView,
     pingInfoView,
+    ollama,
     {
       id: "snmp",
       name: "SNMP",
@@ -125,12 +132,11 @@ export async function getToolCapabilities(): Promise<ToolCapability[]> {
 }
 
 export function getDefaultCidr() {
-  const first = getLocalInterfaces().find((entry) => !entry.internal);
-  return first?.cidr || "192.168.1.0/24";
+  return getPreferredLocalInterface()?.cidr || "192.168.1.0/24";
 }
 
 export function getDefaultScope() {
-  const first = getLocalInterfaces().find((entry) => !entry.internal);
+  const first = getPreferredLocalInterface();
   if (!first) return "192.168.1.0/24";
 
   const parts = first.address.split(".");
@@ -139,6 +145,15 @@ export function getDefaultScope() {
   }
 
   return first.cidr;
+}
+
+function getPreferredLocalInterface() {
+  const external = getLocalInterfaces().filter((entry) => !entry.internal);
+  const physical = external.find((entry) => {
+    const prefix = Number(entry.cidr.split("/")[1] || 32);
+    return prefix <= 30 && !/warp|vpn|openvpn|tap|tunnel|virtual|loopback/i.test(entry.name);
+  });
+  return physical || external.find((entry) => Number(entry.cidr.split("/")[1] || 32) <= 30) || external[0];
 }
 
 export function getLocalNetworkContext(): LocalNetworkContext {
@@ -222,9 +237,31 @@ export async function scanNetwork(options: ScanOptions): Promise<ScanResult> {
     collectors.push(nmapCollector);
     snapshot("nmap", `Iniciando Nmap em ${targets.length} alvo(s).`);
     try {
-      const nmapDevices = await runNmap(targets, nmapTool.command || "nmap", emit);
-      mergeDevices(devices, nmapDevices);
-      finishCollector(nmapCollector, "completed", nmapDevices.length, `Enriqueceu ${nmapDevices.length} ativos com Nmap.`);
+      const nmapResult = await runNmap(
+        targets,
+        nmapTool.command || "nmap",
+        devices.map((device) => device.ip),
+        emit,
+      );
+      mergeDevices(devices, nmapResult.devices);
+
+      const successfulSteps = nmapResult.discoverySucceeded + nmapResult.probeSucceeded;
+      const attemptedSteps = nmapResult.discoveryAttempted + nmapResult.probeAttempted;
+      const warningText = nmapResult.warnings.length > 0
+        ? ` ${nmapResult.warnings.length} lote(s) falharam sem descartar os demais.`
+        : "";
+      const message = `Nmap concluiu ${successfulSteps}/${attemptedSteps} lote(s) e enriqueceu ${nmapResult.devices.length} ativo(s).${warningText}`;
+
+      if (nmapResult.warnings.length > 0) {
+        notes.push(...nmapResult.warnings.slice(0, 8).map((warning) => `Nmap parcial: ${warning}`));
+      }
+
+      finishCollector(
+        nmapCollector,
+        successfulSteps > 0 ? "completed" : "failed",
+        nmapResult.devices.length,
+        successfulSteps > 0 ? message : nmapResult.warnings[0] || "Nmap nao concluiu nenhum lote.",
+      );
       snapshot("nmap", nmapCollector.message);
     } catch (error) {
       finishCollector(nmapCollector, "failed", 0, error instanceof Error ? error.message : "Falha ao executar Nmap.");
@@ -311,7 +348,9 @@ export async function scanNetwork(options: ScanOptions): Promise<ScanResult> {
     "Passive capture",
     "tshark",
     "skipped",
-    tsharkTool?.available ? "Disponivel, mas captura passiva ainda nao foi iniciada pela UI." : "TShark/Wireshark CLI nao encontrado no PATH.",
+    tsharkTool?.available
+      ? "Disponivel no diagnostico Passivo de cada host; nao executado automaticamente para evitar captura global desnecessaria."
+      : "TShark/Wireshark CLI nao encontrado no PATH.",
   ));
 
   inferTopology(devices);
@@ -580,78 +619,121 @@ async function lookupName(ip: string) {
   }
 }
 
-async function runNmap(targets: ParsedTarget[], command: string, emit?: (type: ScanProgressEvent["type"], stage: string, message: string) => void): Promise<Device[]> {
-  const discovered = new Set<string>();
+async function runNmap(
+  targets: ParsedTarget[],
+  command: string,
+  seedIps: string[] = [],
+  emit?: (type: ScanProgressEvent["type"], stage: string, message: string) => void,
+): Promise<NmapRunResult> {
+  const discovered = new Set(seedIps.filter(isIpLiteral));
   const devices: Device[] = [];
+  const warnings: string[] = [];
   const discoveryTargets = expandNmapDiscoveryTargets(targets);
-  emit?.("stage", "nmap", `Nmap ping sweep em ${discoveryTargets.length} alvo(s) normalizados.`);
+  emit?.("stage", "nmap", `Nmap ping sweep em ${discoveryTargets.length} alvo(s), com ${discovered.size} IP(s) ja encontrados pelo coletor nativo.`);
 
-  const chunks = chunkItems(discoveryTargets, 512);
-  for (const [index, chunk] of chunks.entries()) {
-    emit?.("stage", "nmap", `Nmap descoberta: lote ${index + 1}/${chunks.length} (${chunk.length} alvo(s)).`);
-    const { stdout } = await execFileAsync(
-      command,
-      ["-sn", "-n", "-T4", "--max-retries", "1", "--host-timeout", "5s", "-PE", "-PS22,80,443,445", "-PA80,443,445", "-oG", "-", ...chunk],
-      { timeout: 180000, maxBuffer: 1024 * 1024 * 16 },
-    );
-    for (const line of stdout.split(/\r?\n/)) {
+  const discoveryRuns = await mapLimit(discoveryTargets, NMAP_DISCOVERY_CONCURRENCY, async (target, index) => {
+    emit?.("stage", "nmap", `Nmap descoberta: alvo ${index + 1}/${discoveryTargets.length} (${target}).`);
+    try {
+      const { stdout } = await execFileAsync(
+        command,
+        ["-sn", "-n", "-T4", "--max-retries", "1", "--host-timeout", "8s", "-PE", "-PS22,80,443,445", "-PA80,443,445", "-oG", "-", target],
+        { timeout: NMAP_DISCOVERY_TIMEOUT_MS, maxBuffer: 1024 * 1024 * 8, windowsHide: true },
+      );
+      return { target, stdout, ok: true };
+    } catch (error) {
+      return { target, stdout: commandPartialStdout(error), ok: false, error: formatCommandFailure(error) };
+    }
+  });
+
+  let discoverySucceeded = 0;
+  for (const run of discoveryRuns) {
+    if (run.ok) discoverySucceeded += 1;
+    else warnings.push(`descoberta ${run.target}: ${run.error}`);
+    for (const line of run.stdout.split(/\r?\n/)) {
       const hostMatch = line.match(/^Host:\s+(\S+).+Status:\s+Up/);
       if (hostMatch) discovered.add(hostMatch[1]);
     }
     emit?.("stage", "nmap", `Nmap descoberta: ${discovered.size} host(s) up ate agora.`);
   }
 
-  if (discovered.size === 0) return devices;
+  if (discovered.size === 0) {
+    return {
+      devices,
+      warnings,
+      discoverySucceeded,
+      discoveryAttempted: discoveryRuns.length,
+      probeSucceeded: 0,
+      probeAttempted: 0,
+    };
+  }
 
   const discoveredIps = Array.from(discovered).sort((a, b) => ipToNumber(a) - ipToNumber(b));
   const probeIps = discoveredIps.slice(0, SERVICE_SCAN_HOST_LIMIT);
   emit?.("stage", "nmap", `Nmap servicos: sondando ${probeIps.length}/${discoveredIps.length} host(s) descobertos.`);
 
-  const { stdout } = await execFileAsync(
-    command,
-    ["-oG", "-", "-sV", "--version-light", "-p", COMMON_PORTS.join(","), ...probeIps],
-    { timeout: 300000, maxBuffer: 1024 * 1024 * 16 },
-  );
+  const probeBatches = chunkItems(probeIps, NMAP_SERVICE_BATCH_SIZE);
+  const probeRuns = await mapLimit(probeBatches, NMAP_SERVICE_CONCURRENCY, async (batch, index) => {
+    emit?.("stage", "nmap", `Nmap servicos: lote ${index + 1}/${probeBatches.length} (${batch.length} host(s)).`);
+    try {
+      const { stdout } = await execFileAsync(
+        command,
+        [
+          "-n", "-Pn", "-T4", "--max-retries", "1", "--host-timeout", "20s",
+          "-oG", "-", "-sV", "--version-light", "-p", COMMON_PORTS.join(","), ...batch,
+        ],
+        { timeout: NMAP_SERVICE_TIMEOUT_MS, maxBuffer: 1024 * 1024 * 8, windowsHide: true },
+      );
+      return { index, stdout, ok: true };
+    } catch (error) {
+      return { index, stdout: commandPartialStdout(error), ok: false, error: formatCommandFailure(error) };
+    }
+  });
+
+  let probeSucceeded = 0;
   const probed = new Set<string>();
+  for (const run of probeRuns) {
+    if (run.ok) probeSucceeded += 1;
+    else warnings.push(`servicos lote ${run.index + 1}/${probeRuns.length}: ${run.error}`);
 
-  for (const line of stdout.split(/\r?\n/)) {
-    const hostMatch = line.match(/^Host:\s+(\S+)\s+\(([^)]*)\)\s+Ports:\s+(.+)$/);
-    if (!hostMatch) continue;
+    for (const line of run.stdout.split(/\r?\n/)) {
+      const hostMatch = line.match(/^Host:\s+(\S+)\s+\(([^)]*)\)\s+Ports:\s+(.+)$/);
+      if (!hostMatch) continue;
 
-    const [, ip, rawName, rawPorts] = hostMatch;
-    probed.add(ip);
-    const services = rawPorts.split(",").flatMap((entry): ServiceProbe[] => {
-      const parts = entry.trim().split("/");
-      if (parts.length < 5 || parts[1] !== "open") return [];
-      return [{
-        port: Number(parts[0]),
-        state: "open",
-        protocol: parts[2] === "udp" ? "udp" : "tcp",
-        service: parts[4] || undefined,
-        product: parts.slice(6).join(" ").trim() || undefined,
-      }];
-    });
-    const ports = services.map((service) => service.port);
+      const [, ip, rawName, rawPorts] = hostMatch;
+      probed.add(ip);
+      const services = rawPorts.split(",").flatMap((entry): ServiceProbe[] => {
+        const parts = entry.trim().split("/");
+        if (parts.length < 5 || parts[1] !== "open") return [];
+        return [{
+          port: Number(parts[0]),
+          state: "open",
+          protocol: parts[2] === "udp" ? "udp" : "tcp",
+          service: parts[4] || undefined,
+          product: parts.slice(6).join(" ").trim() || undefined,
+        }];
+      });
+      const ports = services.map((service) => service.port);
 
-    const name = rawName || `host-${ip.split(".").at(-1)}`;
-    const type = inferType({ ip, ports, name, services });
+      const name = rawName || `host-${ip.split(".").at(-1)}`;
+      const type = inferType({ ip, ports, name, services });
 
-    devices.push({
-      id: deviceId(ip),
-      name,
-      ip,
-      type,
-      vlan: `Sub-rede ${bestSubnetForIp(ip, targets)}`,
-      status: "online",
-      details: type === "unknown" ? "Enriquecido por Nmap; tipo nao confirmado" : "Enriquecido por Nmap",
-      openPorts: ports,
-      services,
-      subnet: bestSubnetForIp(ip, targets),
-      source: "nmap",
-      confidence: "high",
-      riskLevel: inferRisk(ports),
-      evidence: ["Nmap ping sweep", "Nmap service/version probe"],
-    });
+      devices.push({
+        id: deviceId(ip),
+        name,
+        ip,
+        type,
+        vlan: `Sub-rede ${bestSubnetForIp(ip, targets)}`,
+        status: "online",
+        details: type === "unknown" ? "Enriquecido por Nmap; tipo nao confirmado" : "Enriquecido por Nmap",
+        openPorts: ports,
+        services,
+        subnet: bestSubnetForIp(ip, targets),
+        source: "nmap",
+        confidence: "high",
+        riskLevel: inferRisk(ports),
+        evidence: ["Nmap ping sweep", "Nmap service/version probe"],
+      });
+    }
   }
 
   for (const ip of discoveredIps) {
@@ -675,7 +757,28 @@ async function runNmap(targets: ParsedTarget[], command: string, emit?: (type: S
     });
   }
 
-  return devices;
+  return {
+    devices,
+    warnings,
+    discoverySucceeded,
+    discoveryAttempted: discoveryRuns.length,
+    probeSucceeded,
+    probeAttempted: probeRuns.length,
+  };
+}
+
+function commandPartialStdout(error: unknown) {
+  const stdout = (error as { stdout?: unknown })?.stdout;
+  return typeof stdout === "string" ? stdout : "";
+}
+
+function formatCommandFailure(error: unknown) {
+  const failure = error as { killed?: boolean; signal?: string; stderr?: unknown; message?: string };
+  if (failure?.killed) return "tempo limite excedido";
+  const stderr = typeof failure?.stderr === "string" ? failure.stderr.split(/\r?\n/).find(Boolean) : undefined;
+  if (stderr) return stderr.trim().slice(0, 240);
+  const message = failure?.message?.split(/\r?\n/).find(Boolean);
+  return (message || `falha ao executar comando${failure?.signal ? ` (${failure.signal})` : ""}`).slice(0, 240);
 }
 
 function expandNmapDiscoveryTargets(targets: ParsedTarget[]) {
@@ -704,11 +807,30 @@ async function runWirelessNetworkWatcher(command: string): Promise<Device[]> {
   const outputFile = path.join(os.tmpdir(), `wnetwatcher-${Date.now()}.csv`);
   const configFile = path.join(os.tmpdir(), `wnetwatcher-${Date.now()}.cfg`);
   try {
+    const preferredInterface = getPreferredLocalInterface();
+    const range = preferredInterface ? cidrHostRange(preferredInterface.cidr) : undefined;
+    if (!range) throw new Error("Nao foi possivel determinar a faixa IPv4 da interface fisica local.");
+
+    await fs.writeFile(configFile, [
+      "[General]",
+      "UseNetworkAdapter=0",
+      "UseIPAddressesRange=1",
+      `IPAddressFrom=${range.from}`,
+      `IPAddressTo=${range.to}`,
+      "ScanOnProgramStart=1",
+      "BackgroundScan=0",
+      "AutoShowAdvancedOptions=0",
+      "ScanIPv6Addresses=0",
+      "ShowInactiveDevices=0",
+      "ShowPrevDevices=0",
+      "",
+    ].join("\r\n"), "utf-8");
+
     await execFileAsync(command, ["/cfg", configFile, "/scomma", outputFile], { timeout: WNETWATCHER_TIMEOUT_MS, windowsHide: true });
-    const csv = await fs.readFile(outputFile, "utf-8");
+    const csv = await readTextFileWhenReady(outputFile);
     return parseWNetWatcherCsv(csv);
   } catch (error) {
-    const partialCsv = await fs.readFile(outputFile, "utf-8").catch(() => "");
+    const partialCsv = await readTextFileWhenReady(outputFile, 1500).catch(() => "");
     const partialDevices = partialCsv ? parseWNetWatcherCsv(partialCsv) : [];
     if (partialDevices.length > 0) return partialDevices;
 
@@ -719,6 +841,20 @@ async function runWirelessNetworkWatcher(command: string): Promise<Device[]> {
     await fs.unlink(outputFile).catch(() => undefined);
     await fs.unlink(configFile).catch(() => undefined);
   }
+}
+
+function cidrHostRange(cidr: string) {
+  const match = cidr.match(/^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/);
+  if (!match) return undefined;
+  const prefix = Number(match[2]);
+  if (prefix < 20 || prefix > 30) return undefined;
+  const mask = (0xffffffff << (32 - prefix)) >>> 0;
+  const network = ipToNumber(match[1]) & mask;
+  const broadcast = network | (~mask >>> 0);
+  return {
+    from: numberToIp(network + 1),
+    to: numberToIp(broadcast - 1),
+  };
 }
 
 export async function runDnsLookup(target: string) {
@@ -772,7 +908,7 @@ export async function runDnsLookup(target: string) {
         "/SRVRecords", "1",
         "/scomma", outputFile,
       ], { timeout: 20000, windowsHide: true, maxBuffer: 1024 * 1024 });
-      const csv = await fs.readFile(outputFile, "utf-8");
+      const csv = await readTextFileWhenReady(outputFile);
       const dnsDataRows = parseCsvRecords(csv).slice(0, 30);
       if (dnsDataRows.length > 0) {
         rows.push(...dnsDataRows.map((row) => ({
@@ -807,13 +943,75 @@ export async function runPingDiagnostics(target: string, ports: number[] = []) {
     open: await isPortOpen(target, port),
   }));
 
+  const rows: Record<string, string>[] = [
+    { Teste: "ICMP nativo", Alvo: target, Resultado: ping.online ? "online" : "sem resposta", Latencia: ping.latencyMs ? `${ping.latencyMs} ms` : "" },
+    ...tcp.map((entry) => ({ Teste: "TCP nativo", Alvo: `${target}:${entry.port}`, Resultado: entry.open ? "aberta" : "fechada/filtrada", Latencia: "" })),
+  ];
+
+  const command = await resolveCommand("PingInfoView.exe", [
+    path.join(process.cwd(), "tools", "nirsoft", "PingInfoView.exe"),
+    path.join(process.cwd(), "PingInfoView.exe"),
+    path.join(os.homedir(), "Downloads", "PingInfoView.exe"),
+  ]);
+
+  if (command) {
+    const hostsFile = path.join(os.tmpdir(), `pinginfoview-hosts-${Date.now()}.txt`);
+    const outputFile = path.join(os.tmpdir(), `pinginfoview-${Date.now()}.xml`);
+    const targets = [target, ...uniquePorts.map((port) => `${target}:${port}`)];
+    try {
+      await fs.writeFile(hostsFile, targets.join("\r\n"), "utf-8");
+      await execFileAsync(command, [
+        "/loadfile", hostsFile,
+        "/sxml", outputFile,
+        "/PingEvery", "0",
+        "/StartPingImmediately", "1",
+        "/PingTimeout", "1500",
+        "/ResolveAddresses", "0",
+      ], { timeout: 20000, windowsHide: true, maxBuffer: 1024 * 1024 });
+
+      const xml = await readTextFileWhenReady(outputFile, 5000, /<\/pings_list>/i);
+      const nirsoftRows = Array.from(xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)).slice(0, 20);
+      rows.push(...nirsoftRows.map((match) => ({
+        Teste: "PingInfoView",
+        Alvo: readSimpleXmlTag(match[1], "ip_address") || target,
+        Resultado: readSimpleXmlTag(match[1], "last_ping_status") || "executado",
+        Latencia: formatPingInfoLatency(readSimpleXmlTag(match[1], "average_ping_time")),
+      })));
+      if (nirsoftRows.length === 0) {
+        rows.push({ Teste: "PingInfoView", Alvo: target, Resultado: "executou sem linhas adicionais", Latencia: "" });
+      }
+    } catch (error) {
+      rows.push({ Teste: "PingInfoView", Alvo: target, Resultado: `falhou sem interromper o diagnostico: ${formatCommandFailure(error)}`, Latencia: "" });
+    } finally {
+      await fs.unlink(hostsFile).catch(() => undefined);
+      await fs.unlink(outputFile).catch(() => undefined);
+    }
+  }
+
   return {
-    source: "Native ICMP/TCP",
-    rows: [
-      { Teste: "ICMP", Alvo: target, Resultado: ping.online ? "online" : "sem resposta", Latencia: ping.latencyMs ? `${ping.latencyMs} ms` : "" },
-      ...tcp.map((entry) => ({ Teste: "TCP", Alvo: `${target}:${entry.port}`, Resultado: entry.open ? "aberta" : "fechada/filtrada", Latencia: "" })),
-    ],
+    source: command ? "ICMP/TCP nativo + PingInfoView" : "ICMP/TCP nativo",
+    rows,
   };
+}
+
+function readSimpleXmlTag(xml: string, tag: string) {
+  const match = xml.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, "i"));
+  return (match?.[1] || "")
+    .replace(/<br\s*\/?\s*>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function formatPingInfoLatency(value: string) {
+  if (!value.trim()) return "";
+  const latency = Number(value);
+  return Number.isFinite(latency) ? `${latency.toFixed(1)} ms` : "";
 }
 
 export async function runWindowsDiagnostics(target: string, ports: number[] = []) {
@@ -1742,7 +1940,13 @@ async function commandCapability(
     };
   }
 
-  if (command.toLowerCase() === "wnetwatcher.exe") {
+  const portableExecutables = new Set([
+    "wnetwatcher.exe",
+    "dnsdataview.exe",
+    "pinginfoview.exe",
+  ]);
+
+  if (portableExecutables.has(command.toLowerCase())) {
     return {
       id: command.toLowerCase(),
       name,
@@ -1907,7 +2111,30 @@ function chunkItems<T>(items: T[], size: number) {
   return chunks;
 }
 
-async function mapLimit<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>) {
+async function readTextFileWhenReady(filePath: string, timeoutMs = 5000, completionPattern?: RegExp) {
+  const deadline = Date.now() + timeoutMs;
+  let previous = "";
+
+  while (Date.now() < deadline) {
+    const current = await fs.readFile(filePath).then(decodeTextBuffer).catch(() => "");
+    if (current.length > 0 && completionPattern?.test(current)) return current;
+    if (current.length > 0 && !completionPattern && current === previous) return current;
+    previous = current;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+
+  if (previous.length > 0) return previous;
+  throw new Error(`Arquivo de saida nao ficou disponivel em ${Math.round(timeoutMs / 1000)}s.`);
+}
+
+function decodeTextBuffer(buffer: Buffer) {
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
+    return buffer.subarray(2).toString("utf16le");
+  }
+  return buffer.toString("utf-8").replace(/^\uFEFF/, "");
+}
+
+async function mapLimit<T, R>(items: T[], limit: number, worker: (item: T, index: number) => Promise<R>) {
   const results: R[] = [];
   let index = 0;
 
@@ -1915,10 +2142,19 @@ async function mapLimit<T, R>(items: T[], limit: number, worker: (item: T) => Pr
     while (index < items.length) {
       const current = index;
       index += 1;
-      results[current] = await worker(items[current]);
+      results[current] = await worker(items[current], current);
     }
   }
 
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, runner));
   return results;
+}
+
+interface NmapRunResult {
+  devices: Device[];
+  warnings: string[];
+  discoverySucceeded: number;
+  discoveryAttempted: number;
+  probeSucceeded: number;
+  probeAttempted: number;
 }

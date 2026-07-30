@@ -22,6 +22,13 @@ import {
 dotenv.config();
 
 const ollama = new Ollama({ host: process.env.OLLAMA_URL || "http://localhost:11434" });
+const ollamaModel = process.env.OLLAMA_MODEL || "qwen2.5:3b";
+const ollamaOptions = {
+  num_ctx: Number(process.env.OLLAMA_NUM_CTX || 2048),
+  num_thread: Number(process.env.OLLAMA_NUM_THREAD || 4),
+  temperature: 0.2,
+};
+const ollamaKeepAlive = process.env.OLLAMA_KEEP_ALIVE || "0s";
 
 async function startServer() {
   const app = express();
@@ -154,8 +161,8 @@ async function startServer() {
     try {
       const target = String(req.query.target || getDefaultCidr());
       const useNmap = String(req.query.useNmap || "true") === "true";
-      const useNirsoft = String(req.query.useNirsoft || "false") === "true";
-      const useWebFingerprint = String(req.query.useWebFingerprint || "false") === "true";
+      const useNirsoft = String(req.query.useNirsoft || "true") === "true";
+      const useWebFingerprint = String(req.query.useWebFingerprint || "true") === "true";
       res.json(await scanNetwork({ target, useNmap, useNirsoft, useWebFingerprint }));
     } catch (error) {
       res.status(400).json({
@@ -193,8 +200,8 @@ async function startServer() {
     try {
       const target = String(req.query.target || getDefaultCidr());
       const useNmap = String(req.query.useNmap || "true") === "true";
-      const useNirsoft = String(req.query.useNirsoft || "false") === "true";
-      const useWebFingerprint = String(req.query.useWebFingerprint || "false") === "true";
+      const useNirsoft = String(req.query.useNirsoft || "true") === "true";
+      const useWebFingerprint = String(req.query.useWebFingerprint || "true") === "true";
       send("progress", { type: "stage", stage: "queued", message: "Varredura recebida pelo servidor.", timestamp: new Date().toISOString() });
       const result = await scanNetwork({
         target,
@@ -219,8 +226,10 @@ async function startServer() {
     const { device } = req.body;
     try {
       const response = await ollama.generate({
-        model: process.env.OLLAMA_MODEL || "llama3",
-        prompt: `Voce e um analista de rede. Faca um parecer APENAS do host selecionado usando exclusivamente os dados JSON fornecidos. Nao invente fabricante, sistema, funcao, vulnerabilidade, credencial, CVE ou topologia que nao esteja nos dados. Se algo for desconhecido, diga "nao confirmado". Responda em Portugues do Brasil, em ate 5 bullets curtos, com: identificacao observada, evidencias, riscos observados e proximos testes manuais sugeridos. Dados: ${JSON.stringify(device)}`,
+        model: ollamaModel,
+        prompt: `Voce e um analista de rede. Faca um parecer APENAS do host selecionado usando exclusivamente os dados JSON fornecidos. Nao invente fabricante, sistema, funcao, vulnerabilidade, credencial, CVE ou topologia que nao esteja nos dados. Porta aberta isolada e evidencia de exposicao, nao prova de vulnerabilidade. Nao recomende bloqueio sem antes sugerir a validacao do servico e de sua necessidade. Se algo for desconhecido, diga "nao confirmado". Responda em Portugues do Brasil, em ate 5 bullets curtos, com: identificacao observada, evidencias, riscos observados e proximos testes manuais sugeridos. Dados: ${JSON.stringify(device)}`,
+        options: { ...ollamaOptions, num_predict: 320 },
+        keep_alive: ollamaKeepAlive,
       });
       res.json({ analysis: response.response });
     } catch (error) {
@@ -238,19 +247,21 @@ async function startServer() {
         vlans: result?.vlans,
         highRiskDevices: (result?.devices || [])
           .filter((device: { riskLevel?: string; status?: string }) => device.riskLevel === "high" && device.status === "online")
-          .slice(0, 25)
+          .slice(0, 15)
           .map((device: { ip: string; name: string; type: string; openPorts?: number[]; evidence?: string[] }) => ({
             ip: device.ip,
             name: device.name,
             type: device.type,
             openPorts: device.openPorts,
-            evidence: device.evidence,
+            evidence: (device.evidence || []).slice(0, 4).map((item) => item.slice(0, 300)),
           })),
         collectors: result?.collectors,
       };
       const response = await ollama.generate({
-        model: process.env.OLLAMA_MODEL || "llama3",
-        prompt: `Voce e um analista de rede. Faca um parecer GERAL usando exclusivamente este resumo JSON. Nao invente VLAN confirmada, fabricante, exploracao, CVE ou topologia fisica sem evidencia. Se algo for inferido, chame de inferido. Responda em Portugues do Brasil, objetivo, com no maximo 8 bullets: escopo, pools/sub-redes observados, riscos principais, lacunas de descoberta e proximos passos tecnicos. Dados: ${JSON.stringify(compact)}`,
+        model: ollamaModel,
+        prompt: `Voce e um analista de rede. Faca um parecer GERAL usando exclusivamente este resumo JSON. Nao invente VLAN confirmada, fabricante, exploracao, CVE ou topologia fisica sem evidencia. Porta aberta isolada e evidencia de exposicao, nao prova de vulnerabilidade. Nao recomende bloqueio sem antes sugerir a validacao do servico e de sua necessidade. Se algo for inferido, chame de inferido. Responda em Portugues do Brasil, objetivo, com no maximo 8 bullets: escopo, pools/sub-redes observados, riscos principais, lacunas de descoberta e proximos passos tecnicos. Dados: ${JSON.stringify(compact)}`,
+        options: { ...ollamaOptions, num_predict: 500 },
+        keep_alive: ollamaKeepAlive,
       });
       res.json({ analysis: response.response });
     } catch (error) {
