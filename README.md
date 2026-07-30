@@ -39,11 +39,24 @@ Os graficos e a topologia interativa sao baixados pelo navegador somente quando 
 - **Prioridade de revisao:** indica a ordem sugerida para validacao humana. Nao e prova de invasao ou falha.
 - **Sub-rede/VLAN inferida:** representa o segmento IP observado. Uma VLAN real so pode ser confirmada com dados do equipamento de rede, por exemplo SNMP ou CLI autorizada.
 
-## O que precisa ser instalado
+## Como instalar e executar
 
-O projeto foi desenvolvido principalmente para Windows.
+O RuneScan foi desenvolvido principalmente para Windows. Para usar o aplicativo, escolha uma das opcoes abaixo.
 
-### Obrigatorio
+### Versao Windows recomendada
+
+Na pagina de [Releases](https://github.com/guilhermealceu/RuneScan-Network/releases), baixe um dos arquivos da versao atual:
+
+- **`RuneScan-Network-Setup-...exe`**: instalador assistido. Cria atalhos no menu Iniciar e na area de trabalho.
+- **`RuneScan-Network-Portable-...exe`**: executa sem instalacao. Ideal para pendrive, testes ou uso pontual.
+
+As duas versoes incluem a interface e o servidor local do RuneScan. Nao e necessario instalar Node.js para usa-las.
+
+### Desenvolvimento a partir do codigo-fonte
+
+Para alterar ou executar o projeto pelo codigo-fonte, instale os itens abaixo.
+
+#### Obrigatorio
 
 | Item | Para que serve | Instalacao |
 | --- | --- | --- |
@@ -52,7 +65,7 @@ O projeto foi desenvolvido principalmente para Windows.
 
 Sem nenhuma ferramenta adicional, o RuneScan ainda consegue usar ping, ARP, DNS e testes TCP nativos.
 
-### Recomendado
+#### Recomendado
 
 | Ferramenta | Para que serve | Onde obter |
 | --- | --- | --- |
@@ -70,7 +83,7 @@ O projeto reconhece estes executaveis:
 - `DNSDataView.exe`: consultas DNS auxiliares.
 - `PingInfoView.exe`: diagnosticos ICMP e TCP.
 
-Nesta copia do projeto eles devem estar em:
+No codigo-fonte, eles devem estar em:
 
 ```text
 tools/nirsoft/
@@ -85,7 +98,7 @@ Se os arquivos nao estiverem presentes, obtenha-os nas paginas oficiais:
 - <https://www.nirsoft.net/utils/dns_records_viewer.html>
 - <https://www.nirsoft.net/utils/multiple_ping_tool.html>
 
-Os utilitarios NirSoft sao opcionais. O Windows Defender ou outro antivirus pode alertar sobre ferramentas de rede; use somente arquivos baixados da fonte oficial e valide as politicas da sua empresa.
+Os utilitarios NirSoft sao opcionais. Nas versoes Windows publicadas, os executaveis presentes em `tools/nirsoft` acompanham o aplicativo. O Windows Defender ou outro antivirus pode alertar sobre ferramentas de rede; use somente arquivos baixados da fonte oficial e valide as politicas da sua empresa.
 
 ## Instalacao passo a passo
 
@@ -189,11 +202,15 @@ Selecione um dispositivo no inventario para ver:
 - Diagnosticos DNS, ping/TCP, Windows, web e captura passiva.
 - Parecer local do Ollama, quando disponivel.
 
-### Controladoras de servidor
+### Interfaces e assinaturas web
 
-Quando o fingerprint web esta ativado, o RuneScan reconhece interfaces de gerenciamento pelas informacoes publicas da pagina e do certificado HTTPS. Ha assinaturas para Lenovo XClarity Controller (XCC), Dell iDRAC, HPE iLO, Supermicro BMC/IPMI, OpenBMC e IBM IMM.
+Quando o fingerprint web esta ativado, o RuneScan le a resposta publica de HTTP/HTTPS — titulo da pagina, cabecalhos, HTML inicial e certificado TLS — sem preencher formularios, clicar na pagina ou tentar login. Ha assinaturas para Lenovo XClarity Controller (XCC), Dell iDRAC, HPE iLO, Supermicro BMC/IPMI, OpenBMC, IBM IMM, pfSense, TP-Link, FOG Project, Checkmk, Passbolt e Xibo Digital Signage.
 
-Ao encontrar uma assinatura forte, o inventario passa a mostrar o fabricante, o nome publicado no certificado e a funcao de gerenciamento do servidor. O RuneScan nao tenta login e nao coleta credenciais.
+Ao encontrar uma assinatura forte, o inventario passa a mostrar o produto e a funcao identificada, substituindo nomes genericos como `host-19` quando apropriado. Quando nao ha assinatura conhecida, um titulo especifico pode ser usado apenas como identificacao inferida. Titulos genericos ou temporarios, como `Login`, `Administration` e `Loading Web Application`, sao ignorados para evitar classificacoes erradas. O RuneScan nao tenta login e nao coleta credenciais.
+
+### Informacoes da rede local
+
+No topo do painel, o RuneScan mostra o adaptador em uso, IPv4/prefixo, gateway padrao, DHCP/IP fixo e, quando disponivel, SSID e sinal do Wi-Fi. Esses dados sao coletados da maquina que esta executando o RuneScan; eles nao descrevem necessariamente a rede de um inventario antigo salvo no navegador.
 
 ## IPs candidatos a livres
 
@@ -226,7 +243,11 @@ A comparacao usa o MAC como identidade principal e o IP quando o MAC nao esta di
 
 ## Cadastro manual
 
-Ao abrir um equipamento, use **Cadastro do equipamento** para informar nome, tipo, IP fixo planejado, responsavel, setor e observacoes. O cadastro e preservado separadamente do historico e reaplicado nas proximas varreduras pelo MAC ou IP.
+Ao abrir um equipamento, use **Cadastro do equipamento** para informar nome, tipo, IP fixo planejado, responsavel, setor e observacoes. O cadastro e preservado separadamente do historico e reaplicado nas proximas varreduras pelo MAC ou IP. Esses dados ficam no navegador/computador em que foram cadastrados; nao sao enviados automaticamente para outras instalacoes, clientes ou redes.
+
+### Acao SSH
+
+Quando SSH esta disponivel, o botao **SSH** abre um modal para informar usuario e porta e copiar o comando, por exemplo `ssh administrador@10.0.0.67`. A senha e solicitada somente pelo cliente SSH no terminal e nunca e armazenada pelo RuneScan. O aplicativo nao executa login, nao guarda credenciais e ainda nao possui automacao SSH/SNMP.
 
 ## Relatorios
 
@@ -359,6 +380,14 @@ npm start
 
 Os arquivos gerados ficam em `dist/`.
 
+Para gerar os executaveis Windows (instalador e portatil):
+
+```powershell
+npm run dist:win
+```
+
+Os arquivos sao criados em `artifacts-v3/`. Antes de distribuir uma nova versao, valide pelo menos `npm run lint`, `npm test` e a abertura do aplicativo empacotado.
+
 ## Limitacoes atuais
 
 - O foco atual e IPv4 e Windows.
@@ -366,11 +395,11 @@ Os arquivos gerados ficam em `dist/`.
 - Fabricante e tipo do equipamento podem ficar desconhecidos.
 - A topologia exibida e inferida e nao representa necessariamente o cabeamento fisico.
 - VLANs reais ainda nao sao confirmadas por SNMP ou CLI.
-- SNMP e SSH aparecem como integracoes planejadas, mas ainda nao estao implementados.
+- SNMP e automacao SSH/CLI ainda nao estao implementados; a acao SSH atual apenas prepara e copia o comando local.
 - O nivel de prioridade e uma regra de triagem, nao uma avaliacao completa de vulnerabilidades.
 
 ## Seguranca
 
 O servidor escuta em `127.0.0.1` por padrao e nao aceita conexoes de outras maquinas. O acesso pela rede precisa ser ativado explicitamente com `ALLOW_LAN_ACCESS=true`; nesse modo, um `API_TOKEN` forte e obrigatorio e todas as APIs ficam protegidas por uma sessao HTTP-only temporaria.
 
-Nao publique o RuneScan diretamente na internet. Para uso compartilhado ou corporativo, mantenha tambem o firewall restrito a rede autorizada. Limite de requisicoes sera tratado em uma etapa posterior.
+Nao publique o RuneScan diretamente na internet. Para uso compartilhado ou corporativo, mantenha tambem o firewall restrito a rede autorizada. A aplicacao aplica limites de requisicao, mas eles sao uma camada adicional e nao substituem firewall, token forte e controle de acesso da rede.
