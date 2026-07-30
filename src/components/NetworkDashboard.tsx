@@ -1,21 +1,11 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence, animate, useMotionValue, useTransform } from 'motion/react';
-import {
-  ReactFlow,
-  Background,
-  Controls,
-  Handle,
-  Position,
-  getNodesBounds,
-  getViewportForBounds,
-  type Edge,
-  type Node,
-  type NodeProps,
-  type ReactFlowInstance,
-} from '@xyflow/react';
+import type { Edge, Node, NodeProps, Position as FlowPosition, ReactFlowInstance } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { CollectorRun, Device, LocalNetworkContext, ScanResult, ToolCapability } from '../types';
 import { NetworkTree } from './NetworkTree';
+import { clearInventoryCache, listInventoryHistory, loadDeviceProfiles, loadLatestInventory, saveDeviceProfile, saveInventory, type InventoryCacheRecord } from '../storage/inventory-cache';
+import { applyDeviceProfile, applyDeviceProfiles, compareScans, deviceIdentityKey, filterDevices, type DeviceProfile, type InventoryFilters, type ScanComparison } from '../experience/inventory-experience';
 import {
   Activity,
   AlertTriangle,
@@ -29,12 +19,14 @@ import {
   FileSearch,
   FileText,
   Globe,
+  History,
   Info,
   KeyRound,
   LayoutGrid,
   Lock,
   Monitor,
   Network,
+  Radio,
   Sparkles,
   PlugZap,
   Radar,
@@ -49,7 +41,13 @@ import {
   Video,
   Zap,
 } from 'lucide-react';
-import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip as ChartTooltip, LineChart, Line, AreaChart, Area, XAxis, YAxis } from 'recharts';
+
+const RiskDistributionChart = lazy(() => import('./InsightCharts').then((module) => ({ default: module.RiskDistributionChart })));
+const NetworkDensityChart = lazy(() => import('./InsightCharts').then((module) => ({ default: module.NetworkDensityChart })));
+const ReactFlow = lazy(() => import('@xyflow/react').then((module) => ({ default: module.ReactFlow })));
+const Background = lazy(() => import('@xyflow/react').then((module) => ({ default: module.Background })));
+const Controls = lazy(() => import('@xyflow/react').then((module) => ({ default: module.Controls })));
+const Handle = lazy(() => import('@xyflow/react').then((module) => ({ default: module.Handle })));
 
 interface AppConfig {
   defaultCidr: string;
@@ -57,6 +55,7 @@ interface AppConfig {
   liveScanEnabled: boolean;
   tools: ToolCapability[];
   localContext: LocalNetworkContext;
+  scanPolicy?: { maxAddresses: number; maxTargets: number; maxCaptureSeconds: number };
 }
 
 interface ScanProgressEvent {
@@ -64,7 +63,11 @@ interface ScanProgressEvent {
   stage: string;
   message: string;
   timestamp: string;
-  result?: ScanResult;
+  changes?: {
+    deviceCount: number;
+    onlineCount: number;
+    collectors: Array<Pick<CollectorRun, 'id' | 'status' | 'items' | 'message'>>;
+  };
 }
 
 interface DiagnosticResult {
@@ -72,8 +75,6 @@ interface DiagnosticResult {
   rows: Record<string, string>[];
   error?: string;
 }
-
-const STORAGE_KEY = 'runescan:last-result';
 
 export const NetworkDashboard: React.FC = () => {
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
@@ -101,12 +102,32 @@ export const NetworkDashboard: React.FC = () => {
   const [headerCompact, setHeaderCompact] = useState(false);
   const [insightsVisible, setInsightsVisible] = useState(false);
   const [availableIpsOpen, setAvailableIpsOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [history, setHistory] = useState<InventoryCacheRecord[]>([]);
+  const [comparison, setComparison] = useState<ScanComparison | null>(null);
+  const [filters, setFilters] = useState<InventoryFilters>({ search: '', type: '', risk: '', segment: '', actionOnly: false });
   const eventSourceRef = useRef<EventSource | null>(null);
   const detailsRef = useRef<HTMLDivElement | null>(null);
   const previousScanRef = useRef<ScanResult | null>(null);
+  const skipNextPersistRef = useRef(false);
+  const profilesRef = useRef<DeviceProfile[]>([]);
 
   const tools = scanResult?.tools || config?.tools || [];
-  const localContext = scanResult?.localContext || config?.localContext;
+  // O cabeçalho representa a conexão atual deste computador; um inventário salvo
+  // pode carregar um contexto de rede antigo, sem gateway ou de outra rede.
+  const localContext = config?.localContext || scanResult?.localContext;
+  const displayCollectors = useMemo(() => {
+    const changes = progress.find((event) => event.changes)?.changes;
+    if (!loading || !changes) return scanResult?.collectors || [];
+    return changes.collectors.map((collector) => {
+      const previous = scanResult?.collectors.find((item) => item.id === collector.id);
+      return {
+        ...collector,
+        name: previous?.name || collector.id,
+        source: previous?.source || 'native',
+      } as CollectorRun;
+    });
+  }, [loading, progress, scanResult]);
 
   const devicesByRisk = useMemo(() => {
     const devices = scanResult?.devices || [];
@@ -119,6 +140,7 @@ export const NetworkDashboard: React.FC = () => {
   const highRiskDevices = useMemo(() => {
     return (scanResult?.devices || []).filter((device) => device.riskLevel === 'high');
   }, [scanResult]);
+  const filteredDevices = useMemo(() => filterDevices(scanResult?.devices || [], filters), [scanResult, filters]);
 
   const enterWorkMode = () => setHeaderCompact(true);
 
@@ -146,14 +168,13 @@ export const NetworkDashboard: React.FC = () => {
       const payload = JSON.parse(event.data) as ScanProgressEvent;
       setCurrentStage(payload.stage);
       setProgress((items) => [payload, ...items].slice(0, 12));
-      if (payload.result) {
-        setScanResult(payload.result);
-      }
     });
 
     source.addEventListener('done', (event) => {
       const payload = JSON.parse(event.data) as ScanResult;
-      const merged = mergeOfflineDevices(previousScanRef.current, payload, target);
+      const profiled = applyDeviceProfiles(payload, profilesRef.current);
+      setComparison(compareScans(previousScanRef.current, profiled));
+      const merged = mergeOfflineDevices(previousScanRef.current, profiled, target);
       setScanResult(merged);
       previousScanRef.current = null;
       setCurrentStage('finalizado');
@@ -161,6 +182,20 @@ export const NetworkDashboard: React.FC = () => {
         type: 'stage',
         stage: 'done',
         message: 'Varredura finalizada.',
+        timestamp: new Date().toISOString(),
+      }, ...items].slice(0, 12));
+      setLoading(false);
+      source.close();
+      eventSourceRef.current = null;
+    });
+
+    source.addEventListener('cancelled', (event) => {
+      const payload = JSON.parse(event.data) as { message?: string };
+      setCurrentStage('interrompido');
+      setProgress((items) => [{
+        type: 'stage',
+        stage: 'stop',
+        message: payload.message || 'Varredura cancelada.',
         timestamp: new Date().toISOString(),
       }, ...items].slice(0, 12));
       setLoading(false);
@@ -186,7 +221,9 @@ export const NetworkDashboard: React.FC = () => {
     eventSourceRef.current?.close();
     eventSourceRef.current = null;
     previousScanRef.current = null;
-    window.localStorage.removeItem(STORAGE_KEY);
+    void clearInventoryCache();
+    setHistory([]);
+    setComparison(null);
     setScanResult(null);
     setSelectedDevice(null);
     setAiAnalysis(null);
@@ -220,12 +257,13 @@ export const NetworkDashboard: React.FC = () => {
     enterWorkMode();
     eventSourceRef.current?.close();
     eventSourceRef.current = null;
+    void fetch('/api/scan/cancel', { method: 'POST', keepalive: true }).catch(() => undefined);
     setLoading(false);
     setCurrentStage('interrompido');
     setProgress((items) => [{
       type: 'stage',
       stage: 'stop',
-      message: 'Varredura interrompida no navegador. O ultimo snapshot foi preservado.',
+      message: 'Cancelamento solicitado ao servidor. O ultimo inventario concluido foi preservado.',
       timestamp: new Date().toISOString(),
     }, ...items].slice(0, 12));
   };
@@ -307,15 +345,36 @@ export const NetworkDashboard: React.FC = () => {
     }
   };
 
+  const saveRegistration = async (profile: DeviceProfile) => {
+    await saveDeviceProfile(profile);
+    profilesRef.current = [...profilesRef.current.filter((item) => item.key !== profile.key), profile];
+    skipNextPersistRef.current = true;
+    setScanResult((current) => current ? {
+      ...current,
+      devices: current.devices.map((device) => deviceIdentityKey(device) === profile.key ? applyDeviceProfile(device, profile) : device),
+    } : current);
+    setSelectedDevice((current) => current && deviceIdentityKey(current) === profile.key ? applyDeviceProfile(current, profile) : current);
+  };
+
+  const compareWithHistory = (record: InventoryCacheRecord) => {
+    if (!scanResult) return;
+    setComparison(compareScans(record.result, scanResult));
+    setHistoryOpen(false);
+  };
+
   useEffect(() => {
-    const cached = window.localStorage.getItem(STORAGE_KEY);
-    if (cached) {
-      try {
-        setScanResult(JSON.parse(cached) as ScanResult);
-      } catch {
-        window.localStorage.removeItem(STORAGE_KEY);
+    let active = true;
+    void Promise.all([loadLatestInventory(), loadDeviceProfiles(), listInventoryHistory()]).then(([cached, profiles, storedHistory]) => {
+      if (!active) return;
+      profilesRef.current = profiles;
+      setHistory(storedHistory);
+      if (cached) {
+        skipNextPersistRef.current = true;
+        const profiled = applyDeviceProfiles(cached, profiles);
+        setScanResult(profiled);
+        if (storedHistory[1]) setComparison(compareScans(storedHistory[1].result, profiled));
       }
-    }
+    }).catch(() => undefined);
 
     fetch('/api/config')
       .then((response) => response.json())
@@ -324,12 +383,21 @@ export const NetworkDashboard: React.FC = () => {
         setTarget(data.defaultScope || data.defaultCidr);
       })
       .catch(() => undefined);
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {
-    if (scanResult) {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(scanResult));
+    if (!scanResult) return;
+    if (skipNextPersistRef.current) {
+      skipNextPersistRef.current = false;
+      return;
     }
+    const timer = window.setTimeout(() => {
+      void saveInventory(scanResult).then(() => listInventoryHistory()).then(setHistory).catch(() => undefined);
+    }, 1500);
+    return () => window.clearTimeout(timer);
   }, [scanResult]);
 
   useEffect(() => {
@@ -475,6 +543,16 @@ export const NetworkDashboard: React.FC = () => {
                   <FileSearch className="h-4 w-4" />
                 </button>
                 <button
+                  type="button"
+                  onClick={() => setHistoryOpen(true)}
+                  disabled={history.length === 0}
+                  aria-label="Abrir historico de varreduras"
+                  className="flex h-10 w-10 items-center justify-center rounded-md border border-scan-line bg-white text-scan-ink transition hover:border-violet-200 hover:bg-violet-50 hover:text-violet-700 disabled:cursor-not-allowed disabled:opacity-30"
+                  title="Historico e comparacao entre varreduras"
+                >
+                  <History className="h-4 w-4" />
+                </button>
+                <button
                   onClick={clearInventory}
                   aria-label="Limpar inventario"
                   className="flex h-10 w-10 items-center justify-center rounded-md border border-scan-line bg-white text-scan-ink transition hover:border-red-200 hover:bg-red-50 hover:text-red-700"
@@ -506,7 +584,7 @@ export const NetworkDashboard: React.FC = () => {
                 loading={loading}
                 currentStage={currentStage}
                 progress={progress}
-                collectors={scanResult?.collectors || []}
+                collectors={displayCollectors}
                 onOpen={() => setCollectorsOpen(true)}
               />
             )}
@@ -520,6 +598,8 @@ export const NetworkDashboard: React.FC = () => {
           <span>{error}</span>
         </div>
       )}
+
+      <LocalNetworkInfoBanner localContext={localContext} />
 
       <section className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
         <StatCard label="Ativos" value={scanResult?.summary.total || 0} icon={<Cpu className="h-4 w-4" />} />
@@ -558,10 +638,20 @@ export const NetworkDashboard: React.FC = () => {
         />
       )}
 
+      {scanResult && (
+        <InventoryFilterBar
+          devices={scanResult.devices}
+          filters={filters}
+          visibleCount={filteredDevices.length}
+          comparison={comparison}
+          onChange={setFilters}
+        />
+      )}
+
       <section className="grid grid-cols-1 gap-6 lg:gap-8 lg:grid-cols-[350px_1fr] xl:grid-cols-[400px_1fr] 2xl:grid-cols-[450px_1fr]">
         <div>
           <div className="sticky top-10 flex flex-col gap-6">
-            <NetworkTree result={scanResult} devices={scanResult?.devices || []} onSelectDevice={selectDevice} />
+            <NetworkTree result={scanResult} devices={filteredDevices} onSelectDevice={selectDevice} changes={comparison?.changes || {}} />
             <SegmentPanel result={scanResult} />
           </div>
         </div>
@@ -602,6 +692,7 @@ export const NetworkDashboard: React.FC = () => {
                   diagnosticLoading={diagnosticLoading}
                   onRunDiagnostic={(kind) => runDeviceDiagnostic(selectedDevice, kind)}
                 />
+                <DeviceRegistration device={selectedDevice} onSave={saveRegistration} />
                 <AiPanel
                   analyzing={analyzing}
                   networkAnalyzing={networkAnalyzing}
@@ -616,7 +707,7 @@ export const NetworkDashboard: React.FC = () => {
       </section>
 
       <footer className="panel-surface-subtle rounded-xl p-4 text-center text-xs font-semibold uppercase tracking-widest text-black/45">
-        Created by Pilgrims in partnership with Rune Projects
+        RuneScan Network Intelligence · Rune Projects
       </footer>
 
       <NetworkAnalysisModal
@@ -628,12 +719,58 @@ export const NetworkDashboard: React.FC = () => {
       <ToolsModal open={toolsOpen} tools={tools} onClose={() => setToolsOpen(false)} />
       <CollectorsModal
         open={collectorsOpen}
-        collectors={scanResult?.collectors || []}
+        collectors={displayCollectors}
         localContext={localContext}
         progress={progress}
         onClose={() => setCollectorsOpen(false)}
       />
+      <HistoryModal
+        open={historyOpen}
+        history={history}
+        current={scanResult}
+        onCompare={compareWithHistory}
+        onClose={() => setHistoryOpen(false)}
+      />
     </div>
+  );
+};
+
+const InventoryFilterBar = ({ devices, filters, visibleCount, comparison, onChange }: {
+  devices: Device[];
+  filters: InventoryFilters;
+  visibleCount: number;
+  comparison: ScanComparison | null;
+  onChange: (filters: InventoryFilters) => void;
+}) => {
+  const segments = Array.from(new Set(devices.map((device) => device.subnet || device.vlan).filter(Boolean))).sort();
+  const update = (changes: Partial<InventoryFilters>) => onChange({ ...filters, ...changes });
+  return (
+    <section className="panel-surface rounded-xl p-4">
+      <div className="grid gap-3 lg:grid-cols-[minmax(240px,1fr)_repeat(3,180px)_auto]">
+        <label className="flex items-center gap-2 rounded-lg border border-scan-line bg-white px-3">
+          <Search className="h-4 w-4 text-black/35" />
+          <input value={filters.search} onChange={(event) => update({ search: event.target.value })} className="min-w-0 flex-1 bg-transparent py-2.5 text-sm outline-none" placeholder="Nome, IP, fabricante, tipo ou porta" />
+        </label>
+        <select value={filters.type} onChange={(event) => update({ type: event.target.value })} className="rounded-lg border border-scan-line bg-white px-3 py-2.5 text-sm">
+          <option value="">Todos os equipamentos</option>
+          {Array.from(new Set(devices.map((device) => device.type))).sort().map((type) => <option key={type} value={type}>{deviceTypeLabel(type)}</option>)}
+        </select>
+        <select value={filters.risk} onChange={(event) => update({ risk: event.target.value })} className="rounded-lg border border-scan-line bg-white px-3 py-2.5 text-sm">
+          <option value="">Todas as prioridades</option><option value="high">Revisar primeiro</option><option value="medium">Revisar depois</option><option value="low">Rotina</option>
+        </select>
+        <select value={filters.segment} onChange={(event) => update({ segment: event.target.value })} className="rounded-lg border border-scan-line bg-white px-3 py-2.5 text-sm">
+          <option value="">Todos os segmentos</option>
+          {segments.map((segment) => <option key={segment} value={segment}>{segment}</option>)}
+        </select>
+        <button type="button" onClick={() => update({ actionOnly: !filters.actionOnly })} aria-pressed={filters.actionOnly} className={`rounded-lg border px-4 py-2.5 text-xs font-bold uppercase tracking-wider ${filters.actionOnly ? 'border-orange-200 bg-orange-50 text-orange-700' : 'border-scan-line bg-white text-black/55'}`}>
+          {filters.actionOnly ? 'Exigindo ação' : 'Somente ação'}
+        </button>
+      </div>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-black/45">
+        <span>{visibleCount} de {devices.length} equipamento(s) visíveis</span>
+        {comparison && <span className="font-mono">Comparação: +{comparison.newCount} novos · -{comparison.removedCount} removidos · {comparison.newPortCount} porta(s) nova(s)</span>}
+      </div>
+    </section>
   );
 };
 
@@ -738,6 +875,84 @@ const IconToggle = ({
     <Icon className="h-4 w-4" />
   </motion.button>
 );
+
+const LocalNetworkInfoBanner = ({ localContext }: { localContext?: LocalNetworkContext }) => {
+  if (!localContext) return null;
+
+  const active = localContext.activeInterface || localContext.interfaces?.find((i) => !i.internal);
+  const gateway = localContext.defaultGateway || active?.gateway;
+  const isStatic = active?.isStaticIp === true || localContext.hasStaticIp === true;
+
+  const connTypeLabel = active?.wifiSsid
+    ? `Wi-Fi (${active.wifiSsid}) ${active.wifiSignal ? `· ${active.wifiSignal}` : ''}`
+    : active?.connectionType === 'wifi'
+    ? 'Wi-Fi (Sem fio)'
+    : active?.connectionType === 'ethernet'
+    ? 'Cabo Ethernet'
+    : active?.connectionType === 'vpn'
+    ? 'Conexão VPN'
+    : active?.name || 'Rede Local';
+
+  return (
+    <div className="my-2 grid gap-3">
+      {localContext.warning && (
+        <div className="flex items-start gap-3 rounded-lg border border-amber-300 bg-amber-50/95 p-4 text-sm text-amber-900 shadow-sm">
+          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
+          <div className="min-w-0 flex-1">
+            <p className="font-bold text-amber-950">⚠️ Atenção: Configuração de IP Fixo (DHCP Desativado)</p>
+            <p className="mt-1 leading-5 text-amber-850">{localContext.warning}</p>
+          </div>
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-scan-line bg-white/80 p-4 shadow-sm backdrop-blur">
+        <div className="flex flex-wrap items-center gap-6">
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-scan-line bg-black/[0.03]">
+              {active?.connectionType === 'wifi' || active?.wifiSsid ? (
+                <Radio className="h-4 w-4 text-scan-accent" />
+              ) : (
+                <Network className="h-4 w-4 text-scan-accent" />
+              )}
+            </div>
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-black/40">Adaptador & Rede</p>
+              <p className="text-sm font-semibold text-scan-ink">{connTypeLabel}</p>
+            </div>
+          </div>
+
+          <div className="hidden h-8 w-px bg-scan-line sm:block" />
+
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wider text-black/40">Endereço IP Local</p>
+            <p className="font-mono text-sm font-bold text-scan-ink">{active ? `${active.address}/${active.cidr.split('/')[1] || '?'}` : 'Detectando...'}</p>
+          </div>
+
+          <div className="hidden h-8 w-px bg-scan-line sm:block" />
+
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wider text-black/40">Gateway Padrão</p>
+            <p className="font-mono text-sm font-bold text-scan-ink">{gateway || 'Não detectado'}</p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          {isStatic ? (
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-300 bg-amber-100 px-3 py-1 text-xs font-bold text-amber-900" title="DHCP Desativado - IP fixado manualmente no adaptador">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-amber-500" />
+              IP FIXO (Estático)
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-green-200 bg-green-50 px-3 py-1 text-xs font-bold text-green-700" title="DHCP Habilitado - IP atribuído dinamicamente pelo roteador/gateway">
+              <span className="h-2 w-2 rounded-full bg-green-500" />
+              DHCP (Dinâmico)
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
 
 const CollectorInlineStatus = ({
   loading,
@@ -900,6 +1115,35 @@ const AppModal = ({
       </motion.div>
     )}
   </AnimatePresence>
+);
+
+const HistoryModal = ({ open, history, current, onCompare, onClose }: {
+  open: boolean;
+  history: InventoryCacheRecord[];
+  current: ScanResult | null;
+  onCompare: (record: InventoryCacheRecord) => void;
+  onClose: () => void;
+}) => (
+  <AppModal open={open} title="Historico de varreduras" icon={<History className="h-4 w-4 text-violet-600" />} onClose={onClose}>
+    <div className="grid gap-3">
+      <p className="text-sm leading-6 text-black/55">Selecione uma execução anterior para comparar com o inventário atualmente exibido.</p>
+      {history.map((record, index) => {
+        const sameExecution = record.result.timestamp === current?.timestamp;
+        return (
+          <div key={record.id} className="flex flex-col gap-3 rounded-xl border border-scan-line bg-white/75 p-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <div className="flex items-center gap-2"><strong className="font-mono text-sm">{record.result.target}</strong>{index === 0 && <span className="rounded bg-green-50 px-2 py-0.5 text-[9px] font-bold uppercase text-green-700">mais recente</span>}</div>
+              <p className="mt-1 text-xs text-black/45">{new Date(record.savedAt).toLocaleString('pt-BR')} · {record.result.summary.total} equipamentos · {record.result.summary.highRisk} prioritários</p>
+            </div>
+            <button type="button" onClick={() => onCompare(record)} disabled={!current || sameExecution} className="rounded-lg border border-scan-line bg-white px-3 py-2 text-xs font-bold uppercase tracking-wider hover:border-violet-200 hover:bg-violet-50 hover:text-violet-700 disabled:opacity-35">
+              {sameExecution ? 'Em exibição' : 'Comparar'}
+            </button>
+          </div>
+        );
+      })}
+      {history.length === 0 && <p className="rounded-lg border border-dashed border-scan-line p-8 text-center text-sm text-black/45">O histórico será criado após a primeira varredura concluída.</p>}
+    </div>
+  </AppModal>
 );
 
 const ToolsModal = ({ open, tools, onClose }: { open: boolean; tools: ToolCapability[]; onClose: () => void }) => (
@@ -1461,35 +1705,9 @@ const InsightMetrics = ({ result }: { result: ScanResult }) => {
           <ShieldAlert className="h-4 w-4 text-black/20" />
         </div>
         <div className="h-56">
-          <ResponsiveContainer width="100%" height="100%">
-            <PieChart>
-              <Pie 
-                data={riskData.length ? riskData : [{ name: 'Empty', value: 1, color: '#f8fafc' }]} 
-                dataKey="value" 
-                innerRadius={65} 
-                outerRadius={95} 
-                paddingAngle={8}
-                cornerRadius={12}
-                stroke="none"
-              >
-                {(riskData.length ? riskData : [{ color: '#f1f5f9' }]).map((entry, index) => (
-                  <Cell key={`cell-${index}`} fill={entry.color} className="outline-none" />
-                ))}
-              </Pie>
-              <ChartTooltip 
-                content={({ active, payload }) => {
-                  if (active && payload && payload.length) {
-                    return (
-                      <div className="rounded-2xl border border-black/5 bg-white/95 p-4 text-[12px] font-black shadow-2xl backdrop-blur-md">
-                        <span style={{ color: payload[0].payload.color }}>{payload[0].name}: {payload[0].value} NODES</span>
-                      </div>
-                    );
-                  }
-                  return null;
-                }}
-              />
-            </PieChart>
-          </ResponsiveContainer>
+          <Suspense fallback={<ChartSkeleton />}>
+            <RiskDistributionChart data={riskData} />
+          </Suspense>
         </div>
       </motion.div>
 
@@ -1503,40 +1721,9 @@ const InsightMetrics = ({ result }: { result: ScanResult }) => {
           <Activity className="h-4 w-4 text-black/20" />
         </div>
         <div className="h-56">
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={subnetData} margin={{ top: 20, right: 20, left: 0, bottom: 0 }}>
-              <defs>
-                <linearGradient id="colorAtivos" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#ef4444" stopOpacity={0.4}/>
-                  <stop offset="95%" stopColor="#ef4444" stopOpacity={0}/>
-                </linearGradient>
-              </defs>
-              <XAxis dataKey="label" hide />
-              <YAxis hide />
-              <ChartTooltip 
-                content={({ active, payload }) => {
-                  if (active && payload && payload.length) {
-                    return (
-                      <div className="rounded-2xl border border-black/5 bg-white/95 p-4 text-[12px] font-black shadow-2xl backdrop-blur-md">
-                        <p className="text-black/40 uppercase text-[9px] mb-1 font-black tracking-widest">{payload[0].payload.name}</p>
-                        <p className="text-scan-ink">{payload[0].value} ACTIVE DEVICES</p>
-                      </div>
-                    );
-                  }
-                  return null;
-                }}
-              />
-              <Area 
-                type="monotone" 
-                dataKey="ativos" 
-                stroke="#171717"
-                strokeWidth={4} 
-                fillOpacity={1} 
-                fill="url(#colorAtivos)" 
-                activeDot={{ r: 8, strokeWidth: 0, fill: '#ef4444' }}
-              />
-            </AreaChart>
-          </ResponsiveContainer>
+          <Suspense fallback={<ChartSkeleton />}>
+            <NetworkDensityChart data={subnetData} />
+          </Suspense>
         </div>
       </motion.div>
 
@@ -1549,6 +1736,8 @@ const InsightMetrics = ({ result }: { result: ScanResult }) => {
     </div>
   );
 };
+
+const ChartSkeleton = () => <div className="h-full w-full animate-pulse rounded-2xl bg-black/[0.04]" aria-label="Carregando grafico" />;
 
 const MetricPill = ({ label, value, tone, icon: Icon }: { label: string; value: number; tone: 'red' | 'blue' | 'gray'; icon: any }) => {
   const colors = {
@@ -1601,8 +1790,10 @@ const flowNodeTypes = {
         animate={{ scale: 1, opacity: 1 }}
         className={`min-w-44 overflow-hidden rounded-2xl border bg-white/95 shadow-2xl backdrop-blur-md transition-all hover:ring-2 hover:ring-scan-accent/20 ${flowNodeClass(node)}`}
       >
-        <Handle type="target" position={Position.Left} className="!h-2.5 !w-2.5 !border-none !bg-black/20" />
-        <Handle type="source" position={Position.Right} className="!h-2.5 !w-2.5 !border-none !bg-black/20" />
+        <Suspense fallback={null}>
+          <Handle type="target" position={'left' as FlowPosition} className="!h-2.5 !w-2.5 !border-none !bg-black/20" />
+          <Handle type="source" position={'right' as FlowPosition} className="!h-2.5 !w-2.5 !border-none !bg-black/20" />
+        </Suspense>
         
         <div className={`h-1.5 w-full ${node.kind === 'root' ? 'bg-scan-ink' : node.risk === 'high' ? 'bg-red-500' : node.risk === 'medium' ? 'bg-orange-500' : 'bg-green-500'}`} />
         
@@ -1642,6 +1833,7 @@ const FlowNetworkMap = ({ result, onSelectDevice }: { result: ScanResult; onSele
 
     try {
       await document.fonts?.ready;
+      const { getNodesBounds, getViewportForBounds } = await import('@xyflow/react');
       const exportNodes = instance.getNodes().map((node) => ({
         ...node,
         measured: {
@@ -1751,27 +1943,29 @@ const FlowNetworkMap = ({ result, onSelectDevice }: { result: ScanResult; onSele
       </div>
       {exportError && <p className="mb-3 text-xs font-medium text-red-600" role="alert">{exportError}</p>}
       <div ref={containerRef} className="h-[720px] overflow-hidden rounded-xl border border-scan-line bg-white/70">
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          nodeTypes={flowNodeTypes}
-          onInit={(instance) => { flowInstanceRef.current = instance; }}
-          fitView
-          fitViewOptions={{ padding: 0.12, minZoom: 0.1, maxZoom: 1 }}
-          minZoom={0.1}
-          maxZoom={1.35}
-          nodesDraggable
-          nodesConnectable={false}
-          elementsSelectable
-          onNodeClick={(_, node) => {
-            const device = (node.data as FlowNodeData).device;
-            if (device) onSelectDevice(device);
-          }}
-          proOptions={{ hideAttribution: true }}
-        >
-          <Background gap={22} size={1} color="rgba(16,20,24,0.14)" />
-          <Controls showInteractive={false} />
-        </ReactFlow>
+        <Suspense fallback={<ChartSkeleton />}>
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={flowNodeTypes}
+            onInit={(instance) => { flowInstanceRef.current = instance; }}
+            fitView
+            fitViewOptions={{ padding: 0.12, minZoom: 0.1, maxZoom: 1 }}
+            minZoom={0.1}
+            maxZoom={1.35}
+            nodesDraggable
+            nodesConnectable={false}
+            elementsSelectable
+            onNodeClick={(_, node) => {
+              const device = (node.data as FlowNodeData).device;
+              if (device) onSelectDevice(device);
+            }}
+            proOptions={{ hideAttribution: true }}
+          >
+            <Background gap={22} size={1} color="rgba(16,20,24,0.14)" />
+            <Controls showInteractive={false} />
+          </ReactFlow>
+        </Suspense>
       </div>
     </div>
   );
@@ -2081,6 +2275,49 @@ function isIpLiteral(value: string) {
   });
 }
 
+const DeviceRegistration = ({ device, onSave }: { device: Device; onSave: (profile: DeviceProfile) => Promise<void> }) => {
+  const [form, setForm] = useState({ name: device.name, type: device.type, fixedIp: device.fixedIp || '', responsible: device.responsible || '', department: device.department || '', notes: device.notes || '' });
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    setForm({ name: device.name, type: device.type, fixedIp: device.fixedIp || '', responsible: device.responsible || '', department: device.department || '', notes: device.notes || '' });
+    setSaved(false);
+  }, [device.id, device.name, device.type, device.fixedIp, device.responsible, device.department, device.notes]);
+  const update = (changes: Partial<typeof form>) => setForm((current) => ({ ...current, ...changes }));
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setSaving(true);
+    setSaved(false);
+    try {
+      await onSave({ key: deviceIdentityKey(device), ...form, updatedAt: new Date().toISOString() });
+      setSaved(true);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <form onSubmit={submit} className="panel-surface rounded-2xl p-6">
+      <div className="mb-5"><h3 className="text-lg font-semibold">Cadastro do equipamento</h3><p className="mt-1 text-xs text-black/45">Informações manuais são preservadas entre varreduras pelo MAC ou, quando ausente, pelo IP.</p></div>
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <RegistrationField label="Nome"><input value={form.name} onChange={(event) => update({ name: event.target.value })} required /></RegistrationField>
+        <RegistrationField label="Tipo"><select value={form.type} onChange={(event) => update({ type: event.target.value as Device['type'] })}>{['router','switch','ap','network','workstation','notebook','phone','tablet','server','camera','printer','iot','unknown'].map((type) => <option key={type} value={type}>{deviceTypeLabel(type as Device['type'])}</option>)}</select></RegistrationField>
+        <RegistrationField label="IP fixo"><input value={form.fixedIp} onChange={(event) => update({ fixedIp: event.target.value })} placeholder="Ex.: 10.1.1.199" /></RegistrationField>
+        <RegistrationField label="Responsável"><input value={form.responsible} onChange={(event) => update({ responsible: event.target.value })} placeholder="Nome ou equipe" /></RegistrationField>
+        <RegistrationField label="Setor"><input value={form.department} onChange={(event) => update({ department: event.target.value })} placeholder="Ex.: Infraestrutura" /></RegistrationField>
+        <RegistrationField label="Observações" wide><textarea value={form.notes} onChange={(event) => update({ notes: event.target.value })} rows={2} placeholder="Função, localização ou informação importante" /></RegistrationField>
+      </div>
+      <div className="mt-5 flex items-center justify-end gap-3">{saved && <span className="text-xs font-semibold text-green-700">Cadastro salvo</span>}<button type="submit" disabled={saving} className="rounded-lg bg-scan-ink px-4 py-2.5 text-xs font-bold uppercase tracking-wider text-white hover:bg-scan-accent disabled:opacity-50">{saving ? 'Salvando...' : 'Salvar cadastro'}</button></div>
+    </form>
+  );
+};
+
+const RegistrationField = ({ label, wide, children }: { label: string; wide?: boolean; children: React.ReactElement<{ className?: string }> }) => (
+  <label className={`grid gap-1.5 text-xs font-bold text-black/55 ${wide ? 'md:col-span-2 xl:col-span-3' : ''}`}>
+    {label}
+    {React.cloneElement(children, { className: `${children.props.className || ''} rounded-lg border border-scan-line bg-white px-3 py-2.5 text-sm font-normal text-scan-ink outline-none focus:border-scan-accent` })}
+  </label>
+);
+
 const DeviceDetails = ({
   device,
   diagnostic,
@@ -2092,6 +2329,7 @@ const DeviceDetails = ({
   diagnosticLoading: string | null;
   onRunDiagnostic: (kind: 'dns' | 'ping' | 'windows' | 'passive' | 'web') => void;
 }) => {
+  const [sshModalOpen, setSshModalOpen] = useState(false);
   const actions = getDeviceActions(device);
   const riskReasons = getRiskReasons(device);
   const hasWebSurface = actions.some((action) => action.kind === 'http' || action.kind === 'https');
@@ -2143,7 +2381,7 @@ const DeviceDetails = ({
             {actions.map((action) => (
               <button
                 key={`${action.kind}-${action.port}`}
-                onClick={() => openDeviceAction(action.href)}
+                onClick={() => action.kind === 'ssh' ? setSshModalOpen(true) : openDeviceAction(action.href)}
                 className="group flex h-10 items-center justify-center gap-3 rounded-lg border border-transparent px-4 py-2 text-[10px] font-black uppercase tracking-[0.1em] transition-all hover:bg-scan-ink hover:text-white"
               >
                 <action.icon className="h-3.5 w-3.5" />
@@ -2154,6 +2392,8 @@ const DeviceDetails = ({
             {actions.length === 0 && <p className="px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-black/25">Nenhuma interface de acesso detectada</p>}
           </div>
         </div>
+
+        <SshCommandModal open={sshModalOpen} target={device.ip} onClose={() => setSshModalOpen(false)} />
 
         <div className="mb-8 grid gap-1 grid-cols-2 md:grid-cols-3 lg:grid-cols-5">
           <button
@@ -2226,7 +2466,22 @@ const DeviceDetails = ({
             <DetailItem label="Discovery Source" value={device.source || 'native'} />
             <DetailItem label="OS Intelligence" value={device.os || 'Undetected'} />
             <DetailItem label="Topology Link" value={device.parentId || 'Inbound'} />
+            <DetailItem label="IP fixo cadastrado" value={device.fixedIp || 'Nao cadastrado'} />
+            <DetailItem label="Responsavel" value={device.responsible || 'Nao cadastrado'} />
+            <DetailItem label="Setor" value={device.department || 'Nao cadastrado'} />
+            <DetailItem label="Origem da identidade" value={device.identitySource === 'manual' ? 'Informado manualmente' : device.confidence === 'high' ? 'Detectado' : 'Inferido'} />
           </div>
+
+          {device.type === 'unknown' && (
+            <div className="rounded-xl border border-blue-200 bg-blue-50/70 p-4 text-sm leading-6 text-blue-950">
+              <p className="font-bold">Por que o tipo não foi identificado?</p>
+              <p className="mt-1 text-blue-900/75">
+                O equipamento respondeu, mas não publicou nome ou serviços suficientes para diferenciar notebook, celular ou outro dispositivo. Ative Nmap e NirSoft, use os diagnósticos DNS/Nome e Windows ou aproveite os dados do DHCP/UniFi no cadastro manual. O RuneScan mantém a correção nas próximas varreduras, preferencialmente pelo MAC.
+              </p>
+            </div>
+          )}
+
+          {device.notes && <div className="rounded-xl border border-scan-line bg-amber-50/60 p-4"><p className="text-[10px] font-bold uppercase tracking-wider text-black/40">Observacoes cadastradas</p><p className="mt-2 text-sm leading-6 text-black/65">{device.notes}</p></div>}
 
           <div className="h-px bg-scan-line" />
 
@@ -2366,6 +2621,51 @@ const NetworkAnalysisModal = ({
     )}
   </AnimatePresence>
 );
+
+const SshCommandModal = ({ open, target, onClose }: { open: boolean; target: string; onClose: () => void }) => {
+  const [username, setUsername] = useState('');
+  const [port, setPort] = useState('22');
+  const [copied, setCopied] = useState(false);
+  const safeUsername = username.trim().replace(/[^a-zA-Z0-9_.-]/g, '');
+  const parsedPort = Number(port);
+  const safePort = Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535 ? parsedPort : 22;
+  const command = `ssh${safePort === 22 ? '' : ` -p ${safePort}`}${safeUsername ? ` ${safeUsername}@` : ' '} ${target}`.replace(/\s+/g, ' ').trim();
+
+  useEffect(() => {
+    if (!open) {
+      setCopied(false);
+      setUsername('');
+      setPort('22');
+    }
+  }, [open]);
+
+  const copyCommand = async () => {
+    await navigator.clipboard.writeText(command);
+    setCopied(true);
+    window.setTimeout(onClose, 650);
+  };
+
+  return (
+    <AnimatePresence>
+      {open && (
+        <motion.div className="fixed inset-0 z-50 flex items-center justify-center bg-scan-ink/45 p-4 backdrop-blur-sm" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={onClose}>
+          <motion.div role="dialog" aria-modal="true" aria-label="Preparar comando SSH" className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl" initial={{ opacity: 0, scale: 0.96, y: 10 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.96, y: 10 }} onMouseDown={(event) => event.stopPropagation()}>
+            <div className="flex items-start justify-between gap-4">
+              <div><h3 className="text-lg font-bold text-scan-ink">Conectar por SSH</h3><p className="mt-1 text-xs leading-5 text-black/50">A senha será solicitada somente no terminal e não é salva aqui.</p></div>
+              <button type="button" onClick={onClose} className="rounded-lg p-2 text-black/40 hover:bg-black/5 hover:text-scan-ink" aria-label="Fechar">×</button>
+            </div>
+            <div className="mt-5 grid gap-4 sm:grid-cols-[minmax(0,1fr)_110px]">
+              <label className="grid min-w-0 gap-1.5 text-xs font-bold text-black/55">Usuário<input autoFocus value={username} onChange={(event) => setUsername(event.target.value)} placeholder="Ex.: administrador" className="box-border w-full min-w-0 rounded-lg border border-scan-line px-3 py-2.5 text-sm font-normal outline-none focus:border-scan-accent" /></label>
+              <label className="grid min-w-0 gap-1.5 text-xs font-bold text-black/55">Porta<input inputMode="numeric" value={port} onChange={(event) => setPort(event.target.value)} className="box-border w-full min-w-0 rounded-lg border border-scan-line px-3 py-2.5 text-sm font-normal outline-none focus:border-scan-accent" /></label>
+            </div>
+            <div className="mt-5 rounded-xl border border-scan-line bg-black/[0.03] p-3"><p className="text-[9px] font-black uppercase tracking-widest text-black/35">Comando</p><code className="mt-1 block break-all font-mono text-sm font-bold text-scan-ink">{command}</code></div>
+            <button type="button" onClick={() => void copyCommand()} className="mt-5 flex w-full items-center justify-center gap-2 rounded-lg bg-scan-ink px-4 py-3 text-xs font-bold uppercase tracking-wider text-white transition hover:bg-scan-accent"><ClipboardCopy className="h-4 w-4" />{copied ? 'Copiado' : 'Copiar comando'}</button>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+};
 
 const DetailItem = ({ label, value }: { label: string; value: string }) => (
   <div className="min-w-0">
@@ -2571,25 +2871,25 @@ function deviceLabel(device: Device) {
   if (device.type === 'ap') return 'AP';
   if (device.type === 'server') return 'SRV';
   if (device.type === 'workstation') return 'PC';
+  if (device.type === 'notebook') return 'NOTE';
+  if (device.type === 'phone') return 'CEL';
+  if (device.type === 'tablet') return 'TAB';
   if (device.type === 'printer') return 'PRN';
   if (device.type === 'camera') return 'CAM';
   return device.ip.split('.').at(-1) || '?';
 }
 
 function getWebFingerprints(device: Device) {
+  const knownProducts = [
+    'fortigate', 'microsoft iis', 'aruba', 'unifi', 'pfsense', 'mikrotik', 'vmware', 'zabbix',
+    'ricoh', 'hikvision', 'dahua', 'axis', 'xclarity', 'idrac', 'hpe ilo', 'openbmc',
+    'supermicro bmc', 'integrated management module',
+  ];
   const fromServices = (device.services || [])
-    .filter((service) => service.product && `${service.service || ''} ${service.product}`.toLowerCase().includes('fortigate')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('microsoft iis')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('aruba')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('unifi')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('pfsense')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('mikrotik')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('vmware')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('zabbix')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('ricoh')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('hikvision')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('dahua')
-      || `${service.service || ''} ${service.product || ''}`.toLowerCase().includes('axis'))
+    .filter((service) => {
+      const text = `${service.service || ''} ${service.product || ''}`.toLowerCase();
+      return Boolean(service.product) && knownProducts.some((product) => text.includes(product));
+    })
     .map((service) => `${service.port}/${service.protocol} ${service.product}`);
 
   const fromEvidence = (device.evidence || [])
@@ -2605,9 +2905,14 @@ function formatValue(value?: string, fallback = 'Nao informado') {
 }
 
 function deviceTypeLabel(type: Device['type']) {
+  const labels: Partial<Record<Device['type'], string>> = {
+    router: 'Roteador', switch: 'Switch', network: 'Equipamento de rede', workstation: 'Computador', notebook: 'Notebook',
+    phone: 'Celular', tablet: 'Tablet', server: 'Servidor', camera: 'Câmera',
+    printer: 'Impressora', iot: 'IoT',
+  };
   if (type === 'unknown') return '?';
-  if (type === 'ap') return 'wifi/ap';
-  return type;
+  if (type === 'ap') return 'Wi-Fi / AP';
+  return labels[type] || type;
 }
 
 function riskClass(risk?: Device['riskLevel']) {

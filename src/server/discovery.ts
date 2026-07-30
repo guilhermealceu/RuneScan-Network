@@ -20,6 +20,7 @@ import type {
   ToolCapability,
   VlanSummary,
 } from "../types";
+import { isAbortError, validateScanTarget } from "./scan-policy";
 
 const execFileAsync = promisify(execFile);
 
@@ -38,6 +39,10 @@ const NMAP_SERVICE_CONCURRENCY = 2;
 const NMAP_SERVICE_BATCH_SIZE = 32;
 const NMAP_SERVICE_TIMEOUT_MS = 120000;
 
+function bundledToolPath(fileName: string) {
+  return path.join(process.env.RUNESCAN_TOOLS_DIR || path.join(process.cwd(), "tools", "nirsoft"), fileName);
+}
+
 interface PingResult {
   ip: string;
   online: boolean;
@@ -50,6 +55,7 @@ interface ScanOptions {
   useNirsoft?: boolean;
   useWebFingerprint?: boolean;
   onProgress?: (event: ScanProgressEvent) => void;
+  signal?: AbortSignal;
 }
 
 interface ParsedTarget {
@@ -65,7 +71,24 @@ export interface ScanProgressEvent {
   stage: string;
   message: string;
   timestamp: string;
-  result?: ScanResult;
+  changes?: {
+    deviceCount: number;
+    onlineCount: number;
+    collectors: Array<Pick<CollectorRun, "id" | "status" | "items" | "message">>;
+  };
+}
+
+export function buildProgressChanges(devices: Device[], collectors: CollectorRun[]): NonNullable<ScanProgressEvent["changes"]> {
+  return {
+    deviceCount: devices.length,
+    onlineCount: devices.filter((device) => device.status === "online").length,
+    collectors: collectors.map(({ id, status, items, message }) => ({ id, status, items, message })),
+  };
+}
+
+export function partialCollectorStatus(attempted: number, succeeded: number): CollectorRun["status"] {
+  if (attempted <= 0) return "skipped";
+  return succeeded > 0 ? "completed" : "failed";
 }
 
 export async function getToolCapabilities(): Promise<ToolCapability[]> {
@@ -81,16 +104,16 @@ export async function getToolCapabilities(): Promise<ToolCapability[]> {
     commandCapability("netsh", ["interface", "show", "interface"], "windows-utility", "Netsh", "Contexto local de interfaces, WLAN e rotas no Windows."),
     commandCapability("WNetWatcher.exe", ["/?"], "windows-utility", "NirSoft Wireless Network Watcher", "Fonte auxiliar para detectar dispositivos na rede local e exportar CSV.", [
       path.join(process.cwd(), "WNetWatcher.exe"),
-      path.join(process.cwd(), "tools", "nirsoft", "WNetWatcher.exe"),
+      bundledToolPath("WNetWatcher.exe"),
       path.join(os.homedir(), "Downloads", "WNetWatcher.exe"),
     ]),
     commandCapability("DNSDataView.exe", ["/?"], "windows-utility", "NirSoft DNSDataView", "Consulta manual de registros DNS/PTR com exportacao CSV para enriquecer hosts selecionados.", [
-      path.join(process.cwd(), "tools", "nirsoft", "DNSDataView.exe"),
+      bundledToolPath("DNSDataView.exe"),
       path.join(process.cwd(), "DNSDataView.exe"),
       path.join(os.homedir(), "Downloads", "DNSDataView.exe"),
     ]),
     commandCapability("PingInfoView.exe", ["/?"], "windows-utility", "NirSoft PingInfoView", "Teste manual de ICMP/TCP ping para hosts e portas selecionadas.", [
-      path.join(process.cwd(), "tools", "nirsoft", "PingInfoView.exe"),
+      bundledToolPath("PingInfoView.exe"),
       path.join(process.cwd(), "PingInfoView.exe"),
       path.join(os.homedir(), "Downloads", "PingInfoView.exe"),
     ]),
@@ -132,19 +155,20 @@ export async function getToolCapabilities(): Promise<ToolCapability[]> {
 }
 
 export function getDefaultCidr() {
-  return getPreferredLocalInterface()?.cidr || "192.168.1.0/24";
+  const preferred = getPreferredLocalInterface();
+  return preferred ? safeDefaultCidr(preferred) : "192.168.1.0/24";
 }
 
 export function getDefaultScope() {
   const first = getPreferredLocalInterface();
   if (!first) return "192.168.1.0/24";
+  return safeDefaultCidr(first);
+}
 
-  const parts = first.address.split(".");
-  if (parts.length === 4 && first.address.startsWith("10.10.")) {
-    return `10.10.0.0/16, ${first.cidr}`;
-  }
-
-  return first.cidr;
+function safeDefaultCidr(networkInterface: LocalInterface) {
+  const prefix = Number(networkInterface.cidr.split("/")[1] || 32);
+  if (prefix >= 20) return networkInterface.cidr;
+  return `${networkInterface.address.split(".").slice(0, 3).join(".")}.0/24`;
 }
 
 function getPreferredLocalInterface() {
@@ -156,18 +180,137 @@ function getPreferredLocalInterface() {
   return physical || external.find((entry) => Number(entry.cidr.split("/")[1] || 32) <= 30) || external[0];
 }
 
-export function getLocalNetworkContext(): LocalNetworkContext {
+export async function getLocalNetworkContext(): Promise<LocalNetworkContext> {
+  const baseInterfaces = getLocalInterfaces();
+  let defaultGateway: string | undefined;
+  let activeIfIp: string | undefined;
+  let wifiInfo: { ssid?: string; signal?: string } = {};
+
+  if (os.platform() === "win32") {
+    try {
+      const { stdout: routeOut } = await execFileAsync("route", ["print", "0.0.0.0"], { timeout: 2500, windowsHide: true });
+      const routeResult = parseRoutePrintDefaultGateway(routeOut);
+      if (routeResult.gateway) defaultGateway = routeResult.gateway;
+      if (routeResult.interfaceIp) activeIfIp = routeResult.interfaceIp;
+    } catch {
+      // Ignore route failure
+    }
+
+    try {
+      const { stdout: netshConfigOut } = await execFileAsync("netsh", ["interface", "ipv4", "show", "config"], { timeout: 3000, windowsHide: true });
+      const parsedNetsh = parseNetshIpv4Config(netshConfigOut);
+
+      for (const iface of baseInterfaces) {
+        const match = parsedNetsh.find(
+          (cfg) =>
+            cfg.ip === iface.address ||
+            (cfg.name && iface.name && cfg.name.toLowerCase() === iface.name.toLowerCase())
+        );
+        if (match) {
+          if (match.gateway) iface.gateway = match.gateway;
+          if (match.dhcpEnabled !== undefined) {
+            iface.dhcpEnabled = match.dhcpEnabled;
+            iface.isStaticIp = !match.dhcpEnabled;
+          }
+        }
+      }
+    } catch {
+      // Ignore netsh failure
+    }
+
+    try {
+      const { stdout: ipconfigOut } = await execFileAsync("ipconfig", ["/all"], { timeout: 3000, windowsHide: true });
+      const parsedAdapters = parseIpconfigAll(ipconfigOut);
+
+      for (const iface of baseInterfaces) {
+        const match = parsedAdapters.find(
+          (adapter) =>
+            adapter.ip === iface.address ||
+            (adapter.mac && iface.mac && adapter.mac.replace(/[:-]/g, "").toLowerCase() === iface.mac.replace(/[:-]/g, "").toLowerCase()) ||
+            (adapter.name && iface.name && adapter.name.toLowerCase().includes(iface.name.toLowerCase()))
+        );
+        if (match) {
+          if (!iface.gateway && match.gateway) iface.gateway = match.gateway;
+          if (iface.dhcpEnabled === undefined && match.dhcpEnabled !== undefined) {
+            iface.dhcpEnabled = match.dhcpEnabled;
+            iface.isStaticIp = !match.dhcpEnabled;
+          }
+          if (match.description) iface.adapterDescription = match.description;
+          if (match.connectionType) iface.connectionType = match.connectionType;
+        }
+      }
+    } catch {
+      // Ignore ipconfig failure
+    }
+
+    try {
+      const { stdout: netshOut } = await execFileAsync("netsh", ["wlan", "show", "interfaces"], { timeout: 2500, windowsHide: true });
+      const ssidMatch = netshOut.match(/SSID\s*:\s*(.+)/i);
+      const signalMatch = netshOut.match(/Sinal\s*:\s*(.+)|Signal\s*:\s*(.+)/i);
+      wifiInfo = {
+        ssid: ssidMatch ? ssidMatch[1].trim() : undefined,
+        signal: signalMatch ? (signalMatch[1] || signalMatch[2]).trim() : undefined,
+      };
+
+      for (const iface of baseInterfaces) {
+        if (/wi-fi|wifi|sem fio/i.test(iface.name) || /wi-fi|wireless/i.test(iface.adapterDescription || "")) {
+          iface.connectionType = "wifi";
+          if (wifiInfo.ssid) iface.wifiSsid = wifiInfo.ssid;
+          if (wifiInfo.signal) iface.wifiSignal = wifiInfo.signal;
+        }
+      }
+    } catch {
+      // Ignore netsh failure
+    }
+  }
+
+  const external = baseInterfaces.filter((entry) => !entry.internal);
+  const activeInterface =
+    (activeIfIp ? external.find((e) => e.address === activeIfIp) : undefined) ||
+    external.find((e) => e.gateway && e.gateway === defaultGateway) ||
+    external.find(
+      (entry) =>
+        entry.gateway &&
+        Number(entry.cidr.split("/")[1] || 32) <= 30 &&
+        !/warp|vpn|openvpn|tap|tunnel|virtual|loopback/i.test(entry.name) &&
+        !/warp|vpn|openvpn|tap|virtual/i.test(entry.adapterDescription || "")
+    ) ||
+    external.find((entry) => entry.gateway) ||
+    external[0];
+
+  if (!defaultGateway && activeInterface?.gateway) {
+    defaultGateway = activeInterface.gateway;
+  }
+  if (activeInterface && defaultGateway && !activeInterface.gateway) {
+    activeInterface.gateway = defaultGateway;
+  }
+
+  const hasStaticIp = activeInterface ? activeInterface.isStaticIp === true : baseInterfaces.some((i) => !i.internal && i.isStaticIp);
+
+  let warning: string | undefined;
+  if (hasStaticIp && activeInterface) {
+    const connLabel = activeInterface.wifiSsid ? `Wi-Fi (${activeInterface.wifiSsid})` : activeInterface.name;
+    warning = `Atenção: O adaptador de rede "${connLabel}" está com IP FIXO (DHCP desativado). Se você alterar de rede local ou de roteador, o IP e o Gateway não serão atualizados automaticamente.`;
+  }
+
   return {
     hostname: os.hostname(),
     platform: `${os.platform()} ${os.release()}`,
-    interfaces: getLocalInterfaces(),
-    routes: [],
+    interfaces: baseInterfaces,
+    routes: defaultGateway ? [{ destination: "0.0.0.0/0", gateway: defaultGateway, interfaceAddress: activeInterface?.address }] : [],
+    defaultGateway,
+    activeInterface,
+    hasStaticIp,
+    warning,
   };
 }
 
 export async function scanNetwork(options: ScanOptions): Promise<ScanResult> {
+  validateScanTarget(options.target);
+  options.signal?.throwIfAborted();
   const tools = await getToolCapabilities();
-  const context = getLocalNetworkContext();
+  options.signal?.throwIfAborted();
+  const context = await getLocalNetworkContext();
   const collectors: CollectorRun[] = [];
   const targets = parseTargets(options.target);
   const primaryTarget = targets.map((target) => target.input).join(", ");
@@ -176,24 +319,23 @@ export async function scanNetwork(options: ScanOptions): Promise<ScanResult> {
   const devices: Device[] = [];
   const notes = [
     "Esta execucao nao usa dados mockados. Se nada aparecer, o resultado real foi vazio ou bloqueado por firewall/permissao.",
-    "Escopos amplos como /16 sao tratados preferencialmente pelo Nmap; o coletor nativo fica em /24 ate /30.",
+    "O escopo total respeita MAX_SCAN_ADDRESSES; redes amplas devem ser divididas em blocos menores ou liberadas conscientemente.",
     "VLANs exibidas como sub-rede sao inferidas. VLAN confirmada exige SNMP/SSH em switches, roteadores ou controladoras.",
     "A topologia fisica sera mais precisa quando houver LLDP/CDP, tabela MAC e ARP coletadas dos equipamentos de camada 2/3.",
   ];
 
-  const emit = (type: ScanProgressEvent["type"], stage: string, message: string, result?: ScanResult) => {
+  const emit = (type: ScanProgressEvent["type"], stage: string, message: string, changes?: ScanProgressEvent["changes"]) => {
     options.onProgress?.({
       type,
       stage,
       message,
       timestamp: new Date().toISOString(),
-      result,
+      changes,
     });
   };
 
   const snapshot = (stage: string, message: string) => {
-    inferTopology(devices);
-    emit("snapshot", stage, message, buildResult(primaryTarget, devices, notes, collectors, tools, context));
+    emit("snapshot", stage, message, buildProgressChanges(devices, collectors));
   };
 
   emit("stage", "setup", `Escopo normalizado: ${primaryTarget}`);
@@ -205,8 +347,8 @@ export async function scanNetwork(options: ScanOptions): Promise<ScanResult> {
   for (const target of nativeTargets) {
     const { cidr, hosts } = target;
     emit("stage", "native", `Ping/ARP em ${cidr} (${hosts.length} hosts).`);
-    const pingResults = await mapLimit(hosts, PING_CONCURRENCY, pingHost);
-    const arpTable = await getArpTable();
+    const pingResults = await mapLimit(hosts, PING_CONCURRENCY, (ip) => pingHost(ip, options.signal), options.signal);
+    const arpTable = await getArpTable(options.signal);
     const candidates = new Set<string>();
 
     for (const result of pingResults) {
@@ -217,7 +359,7 @@ export async function scanNetwork(options: ScanOptions): Promise<ScanResult> {
     }
 
     const onlineByIp = new Map(pingResults.map((result) => [result.ip, result]));
-    mergeDevices(devices, await buildNativeDevices(Array.from(candidates), cidr, arpTable, onlineByIp));
+    mergeDevices(devices, await buildNativeDevices(Array.from(candidates), cidr, arpTable, onlineByIp, options.signal));
     snapshot("native", `Coletor nativo encontrou ${devices.length} ativo(s) ate agora.`);
   }
 
@@ -242,6 +384,7 @@ export async function scanNetwork(options: ScanOptions): Promise<ScanResult> {
         nmapTool.command || "nmap",
         devices.map((device) => device.ip),
         emit,
+        options.signal,
       );
       mergeDevices(devices, nmapResult.devices);
 
@@ -258,12 +401,13 @@ export async function scanNetwork(options: ScanOptions): Promise<ScanResult> {
 
       finishCollector(
         nmapCollector,
-        successfulSteps > 0 ? "completed" : "failed",
+        partialCollectorStatus(attemptedSteps, successfulSteps),
         nmapResult.devices.length,
         successfulSteps > 0 ? message : nmapResult.warnings[0] || "Nmap nao concluiu nenhum lote.",
       );
       snapshot("nmap", nmapCollector.message);
     } catch (error) {
+      if (isAbortError(error)) throw error;
       finishCollector(nmapCollector, "failed", 0, error instanceof Error ? error.message : "Falha ao executar Nmap.");
       snapshot("nmap", nmapCollector.message);
     }
@@ -284,11 +428,12 @@ export async function scanNetwork(options: ScanOptions): Promise<ScanResult> {
     collectors.push(nirsoftCollector);
     snapshot("nirsoft", "Iniciando importacao do NirSoft WNetWatcher.");
     try {
-      const nirsoftDevices = await runWirelessNetworkWatcher(nirsoftTool.command || "WNetWatcher.exe");
+      const nirsoftDevices = await runWirelessNetworkWatcher(nirsoftTool.command || "WNetWatcher.exe", options.signal);
       mergeDevices(devices, nirsoftDevices);
       finishCollector(nirsoftCollector, "completed", nirsoftDevices.length, `Importou ${nirsoftDevices.length} ativos do NirSoft.`);
       snapshot("nirsoft", nirsoftCollector.message);
     } catch (error) {
+      if (isAbortError(error)) throw error;
       finishCollector(nirsoftCollector, "skipped", 0, error instanceof Error ? error.message : "WNetWatcher nao retornou dados nesta execucao.");
       snapshot("nirsoft", nirsoftCollector.message);
     }
@@ -304,10 +449,11 @@ export async function scanNetwork(options: ScanOptions): Promise<ScanResult> {
   }
 
   if (options.useWebFingerprint) {
+    options.signal?.throwIfAborted();
     const webCollector = createCollector("web", "Web fingerprint", "web", "running");
     collectors.push(webCollector);
     snapshot("web", "Identificando interfaces HTTP/HTTPS sem login ou clique.");
-    const webFindings = await enrichWebFingerprints(devices);
+    const webFindings = await enrichWebFingerprints(devices, options.signal);
     finishCollector(
       webCollector,
       "completed",
@@ -331,7 +477,8 @@ export async function scanNetwork(options: ScanOptions): Promise<ScanResult> {
   const telnetCollector = createCollector("telnet", "Telnet exposure check", "tcp", "running");
   collectors.push(telnetCollector);
   snapshot("telnet", "Testando exposicao Telnet em ativos com porta 23 aberta.");
-  const telnetFindings = await enrichTelnetExposure(devices);
+  options.signal?.throwIfAborted();
+  const telnetFindings = await enrichTelnetExposure(devices, options.signal);
   finishCollector(
     telnetCollector,
     "completed",
@@ -353,10 +500,13 @@ export async function scanNetwork(options: ScanOptions): Promise<ScanResult> {
       : "TShark/Wireshark CLI nao encontrado no PATH.",
   ));
 
+
+
   inferTopology(devices);
+  options.signal?.throwIfAborted();
 
   const finalResult = buildResult(primaryTarget, devices, notes, collectors, tools, context);
-  emit("snapshot", "done", "Varredura finalizada.", finalResult);
+  emit("stage", "done", "Varredura finalizada; enviando resultado consolidado.");
   return finalResult;
 }
 
@@ -382,6 +532,101 @@ function getLocalInterfaces(): LocalInterface[] {
   return result;
 }
 
+interface ParsedAdapter {
+  name: string;
+  description?: string;
+  mac?: string;
+  ip?: string;
+  gateway?: string;
+  dhcpEnabled?: boolean;
+  connectionType?: 'wifi' | 'ethernet' | 'vpn' | 'virtual' | 'other';
+}
+
+export function parseRoutePrintDefaultGateway(stdout: string): { gateway?: string; interfaceIp?: string } {
+  const route = stdout.match(/^\s*0\.0\.0\.0\s+0\.0\.0\.0\s+(\d{1,3}(?:\.\d{1,3}){3})\s+(\d{1,3}(?:\.\d{1,3}){3})\s+\d+/m);
+  return route ? { gateway: route[1], interfaceIp: route[2] } : {};
+}
+
+function parseNetshIpv4Config(stdout: string): ParsedAdapter[] {
+  const adapters: ParsedAdapter[] = [];
+  let current: ParsedAdapter | undefined;
+
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const header = line.match(/(?:configuration for interface|configura.{0,8} da interface)\s+"?(.+?)"?$/i);
+    if (header) {
+      if (current) adapters.push(current);
+      current = { name: header[1] };
+      continue;
+    }
+    if (!current) continue;
+
+    const ip = line.match(/\b(\d{1,3}(?:\.\d{1,3}){3})\b/)?.[1];
+    if (/dhcp/i.test(line) && /enabled|habilitado/i.test(line)) {
+      current.dhcpEnabled = /yes|sim/i.test(line);
+    } else if (ip && /default gateway|gateway padr/i.test(line)) {
+      current.gateway = ip;
+    } else if (ip && /ip address|endere.{0,5} ip/i.test(line)) {
+      current.ip = ip;
+    }
+  }
+  if (current) adapters.push(current);
+  return adapters;
+}
+
+function parseIpconfigAll(stdout: string): ParsedAdapter[] {
+  const adapters: ParsedAdapter[] = [];
+  const blocks = stdout.split(/\r?\n\r?\n/);
+
+  for (const block of blocks) {
+    const lines = block.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (lines.length === 0) continue;
+
+    const headerLine = lines[0];
+    if (headerLine.endsWith(":") && !/configura|configuration/i.test(headerLine)) {
+      const adapterName = headerLine.replace(/:$/, "").trim();
+      const isWifi = /wi-fi|wifi|sem fio|wireless/i.test(adapterName);
+      const isEthernet = /ethernet/i.test(adapterName);
+      const isVpn = /vpn|tap|tun|fortinet|wireguard/i.test(adapterName);
+      const isVirtual = /virtual|hyper-v|vbox|vmware/i.test(adapterName);
+
+      const currentAdapter: ParsedAdapter = {
+        name: adapterName,
+        connectionType: isVpn ? "vpn" : isVirtual ? "virtual" : isWifi ? "wifi" : isEthernet ? "ethernet" : "other",
+      };
+
+      for (const line of lines.slice(1)) {
+        if (/descri[cç][aã]o|description/i.test(line)) {
+          currentAdapter.description = line.split(":").slice(1).join(":").trim();
+        } else if (/endere[cç]o f[ií]sico|physical address/i.test(line)) {
+          currentAdapter.mac = line.split(":").slice(1).join(":").trim();
+        } else if (/dhcp habilitado|dhcp enabled/i.test(line)) {
+          const val = line.split(":").slice(1).join(":").trim().toLowerCase();
+          currentAdapter.dhcpEnabled = val.startsWith("s") || val.startsWith("y");
+        } else if (/endere[cç]o ipv4|ipv4 address/i.test(line)) {
+          const rawIp = line.split(":").slice(1).join(":").trim();
+          const ipClean = rawIp.replace(/\([^)]*\)/g, "").trim();
+          if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(ipClean)) {
+            currentAdapter.ip = ipClean;
+          }
+        } else if (/gateway padr[aã]o|default gateway/i.test(line)) {
+          const rawGw = line.split(":").slice(1).join(":").trim();
+          const gwClean = rawGw.replace(/\([^)]*\)/g, "").trim();
+          if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(gwClean)) {
+            currentAdapter.gateway = gwClean;
+          }
+        }
+      }
+
+      if (currentAdapter.ip || currentAdapter.gateway) {
+        adapters.push(currentAdapter);
+      }
+    }
+  }
+
+  return adapters;
+}
+
 function maskToCidr(address: string, netmask: string) {
   const prefix = netmask
     .split(".")
@@ -399,7 +644,7 @@ function parseTargets(rawTarget: string) {
     .filter(Boolean);
 
   if (targets.length === 0) {
-    throw new Error("Informe ao menos um alvo. Exemplo: 10.10.100.1-254, 10.10.0.0/16");
+    throw new Error("Informe ao menos um alvo. Exemplo: 10.10.100.1-254 ou 10.10.100.0/24");
   }
 
   const parsed = targets.map(parseTarget);
@@ -413,7 +658,7 @@ function parseTargets(rawTarget: string) {
 }
 
 function parseTarget(target: string): ParsedTarget {
-  if (target.includes("/") ) return parseCidr(target);
+  if (target.includes("/")) return parseCidr(target);
   if (target.includes("-")) return parseIpRange(target);
   if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(target)) {
     validateIp(target);
@@ -467,7 +712,7 @@ function parseIpRange(rawRange: string): ParsedTarget {
   const start = ipToNumber(startIp);
   const end = ipToNumber(endIp);
   if (end < start) throw new Error("Range invalido: IP final menor que IP inicial.");
-  if (end - start > 4095) throw new Error("Range muito grande. Use CIDR /16-/24 ou divida em blocos menores.");
+  if (end - start > 4095) throw new Error("Range muito grande. Divida o escopo em blocos menores.");
 
   const hosts: string[] = [];
   for (let ip = start; ip <= end; ip += 1) {
@@ -509,12 +754,13 @@ function isIpLiteral(value: string) {
   });
 }
 
-async function buildNativeDevices(ips: string[], cidr: string, arpTable: Map<string, string>, onlineByIp: Map<string, PingResult>) {
+async function buildNativeDevices(ips: string[], cidr: string, arpTable: Map<string, string>, onlineByIp: Map<string, PingResult>, signal?: AbortSignal) {
   const gatewayIp = ips.find((ip) => ip.endsWith(".1")) || ips[0];
   const gatewayId = gatewayIp ? deviceId(gatewayIp) : undefined;
 
   return mapLimit(ips.sort((a, b) => ipToNumber(a) - ipToNumber(b)), 16, async (ip): Promise<Device> => {
-    const services = await scanPorts(ip);
+    signal?.throwIfAborted();
+    const services = await scanPorts(ip, signal);
     const ports = services.map((service) => service.port);
     const mac = arpTable.get(ip);
     const name = await lookupName(ip);
@@ -545,40 +791,42 @@ async function buildNativeDevices(ips: string[], cidr: string, arpTable: Map<str
         ports.length > 0 ? `Portas abertas: ${ports.join(", ")}` : "Sem portas comuns abertas",
       ],
     };
-  });
+  }, signal);
 }
 
-async function pingHost(ip: string): Promise<PingResult> {
+async function pingHost(ip: string, signal?: AbortSignal): Promise<PingResult> {
   const start = Date.now();
   const args = process.platform === "win32" ? ["-n", "1", "-w", "650", ip] : ["-c", "1", "-W", "1", ip];
   try {
-    await execFileAsync("ping", args, { timeout: 1200 });
+    await execFileAsync("ping", args, { timeout: 1200, signal });
     return { ip, online: true, latencyMs: Date.now() - start };
-  } catch {
+  } catch (error) {
+    if (isAbortError(error)) throw error;
     return { ip, online: false };
   }
 }
 
-async function getArpTable() {
+async function getArpTable(signal?: AbortSignal) {
   const entries = new Map<string, string>();
   try {
-    const { stdout } = await execFileAsync("arp", ["-a"], { timeout: 2500 });
+    const { stdout } = await execFileAsync("arp", ["-a"], { timeout: 2500, signal });
     const regex = /(\d{1,3}(?:\.\d{1,3}){3})\s+([0-9a-fA-F:-]{11,17})/g;
     let match: RegExpExecArray | null;
     while ((match = regex.exec(stdout)) !== null) {
       entries.set(match[1], match[2].replaceAll("-", ":").toUpperCase());
     }
-  } catch {
+  } catch (error) {
+    if (isAbortError(error)) throw error;
     // ARP is opportunistic.
   }
   return entries;
 }
 
-async function scanPorts(ip: string): Promise<ServiceProbe[]> {
+async function scanPorts(ip: string, signal?: AbortSignal): Promise<ServiceProbe[]> {
   const checks = await mapLimit(COMMON_PORTS, PORT_CONCURRENCY, async (port) => ({
     port,
-    open: await isPortOpen(ip, port),
-  }));
+    open: await isPortOpen(ip, port, signal),
+  }), signal);
 
   return checks
     .filter((check) => check.open)
@@ -590,18 +838,25 @@ async function scanPorts(ip: string): Promise<ServiceProbe[]> {
     }));
 }
 
-async function isPortOpen(ip: string, port: number) {
-  return isPortOpenWithTimeout(ip, port, PORT_TIMEOUT_MS);
+async function isPortOpen(ip: string, port: number, signal?: AbortSignal) {
+  return isPortOpenWithTimeout(ip, port, PORT_TIMEOUT_MS, signal);
 }
 
-async function isPortOpenWithTimeout(ip: string, port: number, timeoutMs: number) {
+async function isPortOpenWithTimeout(ip: string, port: number, timeoutMs: number, signal?: AbortSignal) {
   return new Promise<boolean>((resolve) => {
     const socket = new net.Socket();
+    let settled = false;
     const done = (open: boolean) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", onAbort);
       socket.destroy();
       resolve(open);
     };
+    const onAbort = () => done(false);
 
+    if (signal?.aborted) return done(false);
+    signal?.addEventListener("abort", onAbort, { once: true });
     socket.setTimeout(timeoutMs);
     socket.once("connect", () => done(true));
     socket.once("timeout", () => done(false));
@@ -624,7 +879,9 @@ async function runNmap(
   command: string,
   seedIps: string[] = [],
   emit?: (type: ScanProgressEvent["type"], stage: string, message: string) => void,
+  signal?: AbortSignal,
 ): Promise<NmapRunResult> {
+  signal?.throwIfAborted();
   const discovered = new Set(seedIps.filter(isIpLiteral));
   const devices: Device[] = [];
   const warnings: string[] = [];
@@ -632,18 +889,20 @@ async function runNmap(
   emit?.("stage", "nmap", `Nmap ping sweep em ${discoveryTargets.length} alvo(s), com ${discovered.size} IP(s) ja encontrados pelo coletor nativo.`);
 
   const discoveryRuns = await mapLimit(discoveryTargets, NMAP_DISCOVERY_CONCURRENCY, async (target, index) => {
+    signal?.throwIfAborted();
     emit?.("stage", "nmap", `Nmap descoberta: alvo ${index + 1}/${discoveryTargets.length} (${target}).`);
     try {
       const { stdout } = await execFileAsync(
         command,
         ["-sn", "-n", "-T4", "--max-retries", "1", "--host-timeout", "8s", "-PE", "-PS22,80,443,445", "-PA80,443,445", "-oG", "-", target],
-        { timeout: NMAP_DISCOVERY_TIMEOUT_MS, maxBuffer: 1024 * 1024 * 8, windowsHide: true },
+        { timeout: NMAP_DISCOVERY_TIMEOUT_MS, maxBuffer: 1024 * 1024 * 8, windowsHide: true, signal },
       );
       return { target, stdout, ok: true };
     } catch (error) {
+      if (isAbortError(error)) throw error;
       return { target, stdout: commandPartialStdout(error), ok: false, error: formatCommandFailure(error) };
     }
-  });
+  }, signal);
 
   let discoverySucceeded = 0;
   for (const run of discoveryRuns) {
@@ -673,6 +932,7 @@ async function runNmap(
 
   const probeBatches = chunkItems(probeIps, NMAP_SERVICE_BATCH_SIZE);
   const probeRuns = await mapLimit(probeBatches, NMAP_SERVICE_CONCURRENCY, async (batch, index) => {
+    signal?.throwIfAborted();
     emit?.("stage", "nmap", `Nmap servicos: lote ${index + 1}/${probeBatches.length} (${batch.length} host(s)).`);
     try {
       const { stdout } = await execFileAsync(
@@ -681,13 +941,14 @@ async function runNmap(
           "-n", "-Pn", "-T4", "--max-retries", "1", "--host-timeout", "20s",
           "-oG", "-", "-sV", "--version-light", "-p", COMMON_PORTS.join(","), ...batch,
         ],
-        { timeout: NMAP_SERVICE_TIMEOUT_MS, maxBuffer: 1024 * 1024 * 8, windowsHide: true },
+        { timeout: NMAP_SERVICE_TIMEOUT_MS, maxBuffer: 1024 * 1024 * 8, windowsHide: true, signal },
       );
       return { index, stdout, ok: true };
     } catch (error) {
+      if (isAbortError(error)) throw error;
       return { index, stdout: commandPartialStdout(error), ok: false, error: formatCommandFailure(error) };
     }
-  });
+  }, signal);
 
   let probeSucceeded = 0;
   const probed = new Set<string>();
@@ -803,7 +1064,7 @@ function expandNmapDiscoveryTargets(targets: ParsedTarget[]) {
   return Array.from(new Set(expanded));
 }
 
-async function runWirelessNetworkWatcher(command: string): Promise<Device[]> {
+async function runWirelessNetworkWatcher(command: string, signal?: AbortSignal): Promise<Device[]> {
   const outputFile = path.join(os.tmpdir(), `wnetwatcher-${Date.now()}.csv`);
   const configFile = path.join(os.tmpdir(), `wnetwatcher-${Date.now()}.cfg`);
   try {
@@ -826,11 +1087,13 @@ async function runWirelessNetworkWatcher(command: string): Promise<Device[]> {
       "",
     ].join("\r\n"), "utf-8");
 
-    await execFileAsync(command, ["/cfg", configFile, "/scomma", outputFile], { timeout: WNETWATCHER_TIMEOUT_MS, windowsHide: true });
-    const csv = await readTextFileWhenReady(outputFile);
+    signal?.throwIfAborted();
+    await execFileAsync(command, ["/cfg", configFile, "/scomma", outputFile], { timeout: WNETWATCHER_TIMEOUT_MS, windowsHide: true, signal });
+    const csv = await readTextFileWhenReady(outputFile, 5000, undefined, signal);
     return parseWNetWatcherCsv(csv);
   } catch (error) {
-    const partialCsv = await readTextFileWhenReady(outputFile, 1500).catch(() => "");
+    if (isAbortError(error)) throw error;
+    const partialCsv = await readTextFileWhenReady(outputFile, 1500, undefined, signal).catch(() => "");
     const partialDevices = partialCsv ? parseWNetWatcherCsv(partialCsv) : [];
     if (partialDevices.length > 0) return partialDevices;
 
@@ -886,7 +1149,7 @@ export async function runDnsLookup(target: string) {
   }
 
   const command = await resolveCommand("DNSDataView.exe", [
-    path.join(process.cwd(), "tools", "nirsoft", "DNSDataView.exe"),
+    bundledToolPath("DNSDataView.exe"),
     path.join(process.cwd(), "DNSDataView.exe"),
     path.join(os.homedir(), "Downloads", "DNSDataView.exe"),
   ]);
@@ -949,7 +1212,7 @@ export async function runPingDiagnostics(target: string, ports: number[] = []) {
   ];
 
   const command = await resolveCommand("PingInfoView.exe", [
-    path.join(process.cwd(), "tools", "nirsoft", "PingInfoView.exe"),
+    bundledToolPath("PingInfoView.exe"),
     path.join(process.cwd(), "PingInfoView.exe"),
     path.join(os.homedir(), "Downloads", "PingInfoView.exe"),
   ]);
@@ -1208,7 +1471,7 @@ interface WebCandidate {
   scheme: "http" | "https";
 }
 
-interface WebProbeResult {
+export interface WebProbeResult {
   ok: boolean;
   finalUrl: string;
   status?: number;
@@ -1221,7 +1484,7 @@ interface WebProbeResult {
   error?: string;
 }
 
-type WebDiagnosticRow = Record<string, string> & {
+export type WebDiagnosticRow = Record<string, string> & {
   URL: string;
   Status: string;
   Produto: string;
@@ -1397,7 +1660,7 @@ function decodeHtml(value: string) {
     .replace(/&gt;/gi, ">");
 }
 
-function fingerprintWeb(result: WebProbeResult) {
+export function fingerprintWeb(result: WebProbeResult) {
   const text = [
     result.finalUrl,
     result.title || "",
@@ -1409,6 +1672,17 @@ function fingerprintWeb(result: WebProbeResult) {
   ].join(" ").toLowerCase();
 
   const rules: Array<{ product: string; type: string; confidence: string; needles: string[] }> = [
+    { product: "FOG Project", type: "server imaging/deployment", confidence: "alta", needles: ["fog project", "/fog/management/", "estimated fog sites"] },
+    { product: "Checkmk", type: "server monitoring", confidence: "alta", needles: ["checkmk", "/cmk/", "checkmk gmbh"] },
+    { product: "Passbolt", type: "server password management", confidence: "alta", needles: ["passbolt", "/auth/login", "passbolt sa"] },
+    { product: "Xibo Digital Signage", type: "server digital signage", confidence: "alta", needles: ["xibo digital signage", "xibo signage", "xibo open source digital signage"] },
+    { product: "TP-Link (equipamento de rede)", type: "network device", confidence: "alta", needles: ["tp-link", "tplink", "tp link"] },
+    { product: "Lenovo XClarity Controller", type: "server management", confidence: "alta", needles: ["xclarity controller", "lenovo xclarity", "cn=xcc-", " xcc-"] },
+    { product: "Dell iDRAC", type: "server management", confidence: "alta", needles: ["idrac", "integrated dell remote access"] },
+    { product: "HPE iLO", type: "server management", confidence: "alta", needles: ["hpe ilo", " hp ilo", "integrated lights-out", "cn=ilo"] },
+    { product: "Supermicro BMC/IPMI", type: "server management", confidence: "alta", needles: ["supermicro", "ipmi login"] },
+    { product: "OpenBMC", type: "server management", confidence: "alta", needles: ["openbmc", "bmcweb"] },
+    { product: "IBM Integrated Management Module", type: "server management", confidence: "alta", needles: ["integrated management module", "ibm imm", "imm2"] },
     { product: "Cisco Device", type: "switch", confidence: "alta", needles: ["cisco switch", "cisco router", "cisco systems", "cisco web", "cisco ios", "cisco"] },
     { product: "FortiGate/Fortinet", type: "router/firewall", confidence: "alta", needles: ["fortigate", "fortinet", "fortiguard", "fortitoken"] },
     { product: "Aruba/Instant On", type: "wifi/ap", confidence: "alta", needles: ["aruba", "instant on", "airwave", "virtual controller"] },
@@ -1417,8 +1691,6 @@ function fingerprintWeb(result: WebProbeResult) {
     { product: "MikroTik RouterOS", type: "router", confidence: "alta", needles: ["mikrotik", "routeros", "winbox"] },
     { product: "VMware ESXi", type: "server/hypervisor", confidence: "alta", needles: ["vmware esx", "vmware esxi", "id_eesx_welcome", "esx welcome"] },
     { product: "Microsoft IIS", type: "server/web", confidence: "alta", needles: ["microsoft-iis", " iis7", "internet information services"] },
-    { product: "iDRAC", type: "server management", confidence: "alta", needles: ["idrac", "integrated dell remote access"] },
-    { product: "HP iLO", type: "server management", confidence: "alta", needles: [" hp ilo", "integrated lights-out", "hpe ilo"] },
     { product: "Zabbix", type: "monitoramento", confidence: "alta", needles: ["zabbix"] },
     { product: "Ricoh", type: "printer", confidence: "alta", needles: ["ricoh", "web image monitor"] },
     { product: "Hikvision", type: "camera", confidence: "alta", needles: ["hikvision"] },
@@ -1440,7 +1712,50 @@ function fingerprintWeb(result: WebProbeResult) {
     result.certificate ? `cert: ${result.certificate}` : "",
   ].filter(Boolean);
 
+  if (isUsefulWebTitle(result.title)) {
+    return { product: result.title.trim(), type: "web interface", confidence: "media", evidence: [`title: ${result.title.trim()}`] };
+  }
+
   return { product: "", type: "", confidence: weakEvidence.length ? "baixa" : "", evidence: weakEvidence };
+}
+
+function isUsefulWebTitle(title?: string) {
+  const normalized = (title || "").trim().replace(/\s+/g, " ");
+  if (normalized.length < 3 || normalized.length > 90) return false;
+  return !/^(login|log in|sign in|admin(?:istration)?|welcome|home|index|dashboard|portal|loading(?: web application)?|please wait|one moment|processing|starting)$/i.test(normalized);
+}
+
+export function managementIdentityFromRows(rows: Array<Record<string, string>>) {
+  const text = rows.map((row) => `${row.Produto || ""} ${row.Tipo || ""} ${row.Certificado || ""}`).join(" ").toLowerCase();
+  const signatures: Array<{ needles: string[]; vendor: string; hostname?: RegExp; name?: string }> = [
+    { needles: ["tp-link", "tplink", "tp link"], vendor: "TP-Link Systems Inc.", name: "TP-Link (equipamento de rede)" },
+    { needles: ["lenovo xclarity", "xcc-"], vendor: "Lenovo", hostname: /^XCC[-_]/i },
+    { needles: ["dell idrac", "idrac"], vendor: "Dell Technologies", hostname: /^iDRAC[-_]/i },
+    { needles: ["hpe ilo", "hp ilo", "lights-out"], vendor: "Hewlett Packard Enterprise", hostname: /^(?:iLO|IL)[-_]?/i },
+    { needles: ["supermicro bmc", "supermicro", "ipmi"], vendor: "Supermicro", hostname: /^(?:BMC|SMC)[-_]/i },
+    { needles: ["openbmc", "bmcweb"], vendor: "OpenBMC", hostname: /^(?:BMC|OpenBMC)[-_]?/i },
+    { needles: ["ibm integrated management", "ibm imm", "imm2"], vendor: "IBM", hostname: /^IMM\d?[-_]/i },
+  ];
+  const signature = signatures.find((item) => item.needles.some((needle) => text.includes(needle)));
+  if (!signature) return undefined;
+
+  const certificateNames = rows
+    .map((row) => row.Certificado?.match(/(?:^|\s)CN=([^/,\s]+)/i)?.[1])
+    .filter((name): name is string => Boolean(name));
+  const name = signature.hostname
+    ? certificateNames.find((candidate) => signature.hostname?.test(candidate))
+    : signature.name;
+  return { vendor: signature.vendor, name };
+}
+
+function webDeviceNameFromRows(rows: Array<Record<string, string>>) {
+  const text = rows.map((row) => `${row.Produto || ""} ${row.Tipo || ""}`).join(" ").toLowerCase();
+  if (hasAny(text, ["fog project", "server imaging/deployment"])) return "FOG Project (servidor de imagens)";
+  if (hasAny(text, ["checkmk", "server monitoring"])) return "Checkmk (servidor de monitoramento)";
+  if (hasAny(text, ["passbolt", "server password management"])) return "Passbolt (gerenciador de senhas)";
+  if (hasAny(text, ["xibo digital signage", "server digital signage"])) return "Xibo Digital Signage (gerenciador de telas)";
+  if (hasAny(text, ["pfsense"])) return "pfSense (firewall)";
+  return undefined;
 }
 
 async function firstOpenGatewayPort(ip: string) {
@@ -1638,21 +1953,33 @@ function splitCsvLine(line: string) {
   return values.map((value) => value.trim());
 }
 
-function mergeDevices(target: Device[], incoming: Device[]) {
+export function mergeDevices(target: Device[], incoming: Device[]) {
   const byId = new Map(target.map((device) => [device.id, device]));
   for (const device of incoming) {
     const current = byId.get(device.id);
     if (!current) {
+      applyDetectedIdentity(device);
       target.push(device);
       byId.set(device.id, device);
       continue;
     }
 
-    current.name = device.name || current.name;
+    const currentNameIsGeneric = isGenericDeviceName(current.name, current.ip);
+    const incomingNameIsUseful = Boolean(device.name) && !isGenericDeviceName(device.name, device.ip);
+    if (!current.name || (currentNameIsGeneric && incomingNameIsUseful)) current.name = device.name;
+    if (!current.mac && device.mac) current.mac = device.mac;
+    if (isPlaceholderVendor(current.vendor) && !isPlaceholderVendor(device.vendor)) current.vendor = device.vendor;
+    if (!current.os && device.os) current.os = device.os;
+    if (!current.fixedIp && device.fixedIp) current.fixedIp = device.fixedIp;
+    if (!current.responsible && device.responsible) current.responsible = device.responsible;
+    if (!current.department && device.department) current.department = device.department;
+    if (!current.notes && device.notes) current.notes = device.notes;
     current.openPorts = Array.from(new Set([...(current.openPorts || []), ...(device.openPorts || [])])).sort((a, b) => a - b);
     current.services = mergeServices(current.services || [], device.services || []);
-    current.source = current.source === "arp" ? "arp" : device.source;
-    current.confidence = "high";
+    if (device.source && current.source === "native") current.source = device.source;
+    current.status = current.status === "online" || device.status === "online" ? "online" : "offline";
+    current.confidence = strongerConfidence(current.confidence, device.confidence);
+    current.lastSeen = device.lastSeen || current.lastSeen;
     current.riskLevel = inferRisk(current.openPorts);
     current.type = inferType({
       ip: current.ip,
@@ -1662,9 +1989,17 @@ function mergeDevices(target: Device[], incoming: Device[]) {
       vendor: current.vendor,
       services: current.services,
     });
-    current.details = [current.details, device.details].filter(Boolean).join(" / ");
+    applyDetectedIdentity(current);
+    current.details = Array.from(new Set([current.details, device.details].filter(Boolean))).join(" / ");
     current.evidence = Array.from(new Set([...(current.evidence || []), ...(device.evidence || [])]));
   }
+}
+
+function strongerConfidence(a?: Device["confidence"], b?: Device["confidence"]): Device["confidence"] {
+  const rank = { low: 1, medium: 2, high: 3 } as const;
+  if (!a) return b || "low";
+  if (!b) return a;
+  return rank[b] > rank[a] ? b : a;
 }
 
 function mergeServices(a: ServiceProbe[], b: ServiceProbe[]) {
@@ -1675,10 +2010,11 @@ function mergeServices(a: ServiceProbe[], b: ServiceProbe[]) {
   return Array.from(merged.values()).sort((left, right) => left.port - right.port);
 }
 
-async function enrichTelnetExposure(devices: Device[]) {
+async function enrichTelnetExposure(devices: Device[], signal?: AbortSignal) {
   const telnetDevices = devices.filter((device) => device.openPorts?.includes(23));
   const results = await mapLimit(telnetDevices, 12, async (device) => {
-    const banner = await probeTelnetBanner(device.ip);
+    signal?.throwIfAborted();
+    const banner = await probeTelnetBanner(device.ip, signal);
     if (banner === null) return false;
 
     const services = device.services || [];
@@ -1707,23 +2043,26 @@ async function enrichTelnetExposure(devices: Device[]) {
       "Sem tentativa de login ou envio de credenciais",
     ]));
     return true;
-  });
+  }, signal);
 
   return results.filter(Boolean).length;
 }
 
-async function enrichWebFingerprints(devices: Device[]) {
+async function enrichWebFingerprints(devices: Device[], signal?: AbortSignal) {
   const webDevices = devices
     .filter((device) => device.status === "online" && webPorts(device).length > 0)
     .slice(0, 256);
 
   const results = await mapLimit(webDevices, 8, async (device) => {
+    signal?.throwIfAborted();
     const diagnostic = await runWebFingerprint(device.ip, webPorts(device));
     const strongRows = diagnostic.rows.filter(isStrongWebRow);
-    if (strongRows.length === 0) return 0;
+    const titleRows = diagnostic.rows.filter(isTitleWebRow);
+    const identifiedRows = strongRows.length > 0 ? strongRows : titleRows;
+    if (identifiedRows.length === 0) return 0;
 
     const services = device.services || [];
-    for (const row of strongRows) {
+    for (const row of identifiedRows) {
       const port = webPortFromUrl(row.URL);
       const existing = services.find((service) => service.protocol === "tcp" && service.port === port);
       const product = [row.Produto, row.Titulo && row.Titulo !== row.Produto ? row.Titulo : ""].filter(Boolean).join(" - ");
@@ -1742,20 +2081,47 @@ async function enrichWebFingerprints(devices: Device[]) {
     }
 
     device.services = mergeServices(services, []);
-    device.type = strongerType(device.type, strongRows);
-    device.confidence = "high";
+    if (strongRows.length > 0) device.type = strongerType(device.type, strongRows);
+    const managementIdentity = managementIdentityFromRows(strongRows);
+    const webName = webDeviceNameFromRows(strongRows);
+    const identityEvidence: string[] = [];
+    if (webName && canReplaceInferredDeviceName(device)) {
+      device.name = webName;
+      device.identitySource = "detected";
+      device.details = `Sistema identificado pela interface web publica: ${strongRows[0].Produto}`;
+    }
+    if (!webName && titleRows[0] && canReplaceInferredDeviceName(device)) {
+      device.name = `${titleRows[0].Titulo} (interface web)`;
+      device.identitySource = "inferred";
+      device.details = `Identidade inferida pelo titulo da interface web: ${titleRows[0].Titulo}`;
+    }
+    if (managementIdentity) {
+      if (device.vendor && !isPlaceholderVendor(device.vendor) && device.vendor !== managementIdentity.vendor) {
+        identityEvidence.push(`Fabricante do MAC: ${device.vendor}; interface de gerenciamento: ${managementIdentity.vendor}`);
+      }
+      device.vendor = managementIdentity.vendor;
+      if (managementIdentity.name && canReplaceInferredDeviceName(device)) device.name = managementIdentity.name;
+      device.details = `Controladora de gerenciamento do servidor identificada como ${strongRows[0].Produto}`;
+    }
+    device.confidence = strongRows.length > 0 ? "high" : strongerConfidence(device.confidence, "medium");
     device.evidence = Array.from(new Set([
       ...(device.evidence || []),
-      ...strongRows.map((row) => `Web fingerprint: ${row.Produto}${row.Tipo ? ` (${row.Tipo})` : ""} em ${row.URL}`),
+      ...identifiedRows.map((row) => `Web fingerprint: ${row.Produto}${row.Tipo ? ` (${row.Tipo})` : ""} em ${row.URL}`),
+      ...strongRows.filter((row) => row.Certificado).map((row) => `Identidade TLS: ${row.Certificado}`),
+      ...identityEvidence,
     ]));
-    return strongRows.length;
-  });
+    return identifiedRows.length;
+  }, signal);
 
   return results.reduce((total, count) => total + count, 0);
 }
 
 function isStrongWebRow(row: Record<string, string>): row is WebDiagnosticRow {
   return Boolean(row.URL && row.Produto && row.Produto !== "nao confirmado" && row.Confianca === "alta");
+}
+
+function isTitleWebRow(row: Record<string, string>): row is WebDiagnosticRow {
+  return Boolean(row.URL && row.Produto && row.Tipo === "web interface" && row.Confianca === "media" && isUsefulWebTitle(row.Titulo));
 }
 
 function webPorts(device: Device) {
@@ -1784,18 +2150,50 @@ function mergeProduct(current: string, next: string) {
   return `${current}; ${next}`;
 }
 
+function isPlaceholderVendor(vendor?: string) {
+  return !vendor || /desconhecido|unknown|generic|oui pendente/i.test(vendor);
+}
+
+function isGenericDeviceName(name: string, ip: string) {
+  return !name || name === ip || /^host-\d+$/i.test(name) || /^unknown$/i.test(name);
+}
+
+export function canReplaceInferredDeviceName(device: Pick<Device, "name" | "ip" | "identitySource">) {
+  return isGenericDeviceName(device.name, device.ip)
+    || (device.identitySource === "inferred" && /\((?:equipamento de rede|funcao nao identificada|dispositivo voip)\)$/i.test(device.name));
+}
+
+function applyDetectedIdentity(device: Device) {
+  const vendor = device.vendor || "";
+  const identity = vendorIdentity(vendor);
+  if (!identity) return;
+
+  if (isGenericDeviceName(device.name, device.ip)) device.name = identity.name;
+  if (device.type === "unknown") device.type = identity.type;
+  device.identitySource = device.identitySource || identity.source;
+}
+
+function vendorIdentity(vendor: string): { name: string; type: Device["type"]; source: NonNullable<Device["identitySource"]> } | undefined {
+  if (/\btp[-\s]?link\b/i.test(vendor)) return { name: "TP-Link (equipamento de rede)", type: "network", source: "detected" };
+  if (/ubiquiti/i.test(vendor)) return { name: "Ubiquiti (equipamento de rede)", type: "ap", source: "inferred" };
+  if (/proxmox/i.test(vendor)) return { name: "Proxmox VM (funcao nao identificada)", type: "server", source: "inferred" };
+  if (/grandstream/i.test(vendor)) return { name: "Grandstream (dispositivo VoIP)", type: "phone", source: "inferred" };
+  return undefined;
+}
+
 function strongerType(current: Device["type"], rows: Record<string, string>[]): Device["type"] {
   const text = rows.map((row) => `${row.Produto} ${row.Tipo}`).join(" ").toLowerCase();
+  if (hasAny(text, ["tp-link", "tplink", "network device"])) return "network";
   if (hasAny(text, ["fortigate", "fortinet", "pfsense", "mikrotik", "router/firewall"])) return "router";
   if (hasAny(text, ["cisco", "switch"])) return "switch";
   if (hasAny(text, ["aruba", "unifi", "ubiquiti", "wifi/ap"])) return "ap";
   if (hasAny(text, ["ricoh", "printer"])) return "printer";
   if (hasAny(text, ["hikvision", "dahua", "axis", "camera"])) return "camera";
-  if (hasAny(text, ["server", "iis", "esxi", "idrac", "ilo", "zabbix"])) return "server";
+  if (hasAny(text, ["server", "iis", "esxi", "idrac", "ilo", "xclarity", "xcc-", "openbmc", "supermicro bmc", "integrated management module", "zabbix", "checkmk", "fog project", "passbolt", "xibo", "imaging/deployment", "server monitoring", "server password management", "server digital signage"])) return "server";
   return current;
 }
 
-async function probeTelnetBanner(ip: string) {
+async function probeTelnetBanner(ip: string, signal?: AbortSignal) {
   return new Promise<string | null>((resolve) => {
     const socket = new net.Socket();
     let settled = false;
@@ -1804,10 +2202,14 @@ async function probeTelnetBanner(ip: string) {
     const finish = (value: string | null) => {
       if (settled) return;
       settled = true;
+      signal?.removeEventListener("abort", onAbort);
       socket.destroy();
       resolve(value);
     };
+    const onAbort = () => finish(null);
 
+    if (signal?.aborted) return finish(null);
+    signal?.addEventListener("abort", onAbort, { once: true });
     socket.setTimeout(1800);
     socket.once("connect", () => {
       setTimeout(() => finish(cleanTelnetBanner(banner)), 700);
@@ -2047,9 +2449,16 @@ function inferType(context: { ip: string; ports: number[]; mac?: string; name?: 
     "ms-wbt-server",
     "microsoft dns",
     "epolicy orchestrator",
+    "xclarity controller",
+    "idrac",
+    "integrated lights-out",
+    "openbmc",
+    "supermicro bmc",
+    "integrated management module",
   ]);
 
   if (ip.endsWith(".1") || hasAny(text, ["router", "gateway", "firewall", "fortigate", "fortinet", "mikrotik", "pfsense", "cisco ios"])) return "router";
+  if (hasAny(text, ["tp-link", "tplink"])) return "network";
   if (hasAny(text, ["aruba", "instant on", "iap-", "ap-", "access point", "wireless ap", "ubiquiti", "unifi", "ruckus", "omada"])) return "ap";
   if (hasAny(text, ["switch", "procurve", "catalyst", "nexus", "comware", "jetstream"])) return "switch";
   if (hasAny(text, ["ricoh", "brother", "hp laserjet", "lexmark", "xerox", "epson", "printer"]) || ports.includes(515) || ports.includes(631)) return "printer";
@@ -2111,11 +2520,12 @@ function chunkItems<T>(items: T[], size: number) {
   return chunks;
 }
 
-async function readTextFileWhenReady(filePath: string, timeoutMs = 5000, completionPattern?: RegExp) {
+async function readTextFileWhenReady(filePath: string, timeoutMs = 5000, completionPattern?: RegExp, signal?: AbortSignal) {
   const deadline = Date.now() + timeoutMs;
   let previous = "";
 
   while (Date.now() < deadline) {
+    signal?.throwIfAborted();
     const current = await fs.readFile(filePath).then(decodeTextBuffer).catch(() => "");
     if (current.length > 0 && completionPattern?.test(current)) return current;
     if (current.length > 0 && !completionPattern && current === previous) return current;
@@ -2134,12 +2544,13 @@ function decodeTextBuffer(buffer: Buffer) {
   return buffer.toString("utf-8").replace(/^\uFEFF/, "");
 }
 
-async function mapLimit<T, R>(items: T[], limit: number, worker: (item: T, index: number) => Promise<R>) {
+async function mapLimit<T, R>(items: T[], limit: number, worker: (item: T, index: number) => Promise<R>, signal?: AbortSignal) {
   const results: R[] = [];
   let index = 0;
 
   async function runner() {
     while (index < items.length) {
+      signal?.throwIfAborted();
       const current = index;
       index += 1;
       results[current] = await worker(items[current], current);

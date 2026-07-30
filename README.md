@@ -21,11 +21,16 @@ Quando uma varredura e iniciada, o RuneScan executa estas etapas:
 3. Se o Nmap estiver instalado, melhora a descoberta e identifica portas, servicos e produtos.
 4. Se habilitado, importa informacoes auxiliares do NirSoft Wireless Network Watcher.
 5. Verifica interfaces HTTP/HTTPS sem fazer login ou clicar na pagina.
-6. Confirma exposicao Telnet sem tentar autenticar.
-7. Junta resultados repetidos e infere o tipo provavel do equipamento.
-8. Exibe o inventario, a topologia inferida, os diagnosticos e os relatorios.
+6. Le o titulo, os cabecalhos e a identidade publica do certificado TLS para reconhecer interfaces conhecidas.
+7. Confirma exposicao Telnet sem tentar autenticar.
+8. Junta resultados repetidos e infere o tipo provavel do equipamento.
+9. Exibe o inventario, a topologia inferida, os diagnosticos e os relatorios.
 
-As atualizacoes aparecem em tempo real no navegador. O ultimo inventario e guardado localmente no navegador para nao desaparecer ao atualizar a pagina.
+As atualizacoes aparecem em tempo real no navegador. Durante a execucao, o servidor envia somente etapa, mensagem e contagens alteradas; o inventario completo e transferido uma vez, ao final.
+
+Os inventarios concluidos sao guardados no IndexedDB do navegador, com versao de esquema e validade de 30 dias. A gravacao ocorre 1,5 segundo depois da ultima alteracao para evitar escritas repetidas. O cache antigo do `localStorage` e migrado automaticamente e o armazenamento mantem ate 25 resultados para suportar historicos maiores.
+
+Os graficos e a topologia interativa sao baixados pelo navegador somente quando a area de insights e aberta. As bibliotecas de exportacao PNG/PDF tambem sao carregadas apenas quando uma exportacao e solicitada.
 
 ### O que os resultados significam
 
@@ -136,6 +141,19 @@ http://127.0.0.1:3005
 
 Se a porta estiver ocupada, o servidor tenta as portas seguintes e informa o endereco correto no terminal.
 
+### Acessar de outro computador da rede
+
+Por seguranca, o RuneScan aceita somente conexoes do proprio computador por padrao. Para liberar o painel na rede local, edite o `.env`:
+
+```env
+ALLOW_LAN_ACCESS=true
+API_TOKEN="use-aqui-um-token-com-pelo-menos-24-caracteres"
+```
+
+Reinicie o servidor e abra `http://IP-DO-COMPUTADOR:3005` na outra maquina. O RuneScan mostrara uma tela de entrada. A sessao fica valida por ate oito horas; o token nao e gravado no armazenamento do navegador.
+
+Nao reutilize senha pessoal nesse campo e nao exponha a porta diretamente na internet.
+
 ## Como usar
 
 ### Informar o alvo
@@ -171,6 +189,12 @@ Selecione um dispositivo no inventario para ver:
 - Diagnosticos DNS, ping/TCP, Windows, web e captura passiva.
 - Parecer local do Ollama, quando disponivel.
 
+### Controladoras de servidor
+
+Quando o fingerprint web esta ativado, o RuneScan reconhece interfaces de gerenciamento pelas informacoes publicas da pagina e do certificado HTTPS. Ha assinaturas para Lenovo XClarity Controller (XCC), Dell iDRAC, HPE iLO, Supermicro BMC/IPMI, OpenBMC e IBM IMM.
+
+Ao encontrar uma assinatura forte, o inventario passa a mostrar o fabricante, o nome publicado no certificado e a funcao de gerenciamento do servidor. O RuneScan nao tenta login e nao coleta credenciais.
+
 ## IPs candidatos a livres
 
 Apos concluir uma varredura, use o botao com o icone de pesquisa de arquivo para abrir **IPs candidatos a livres**.
@@ -184,12 +208,33 @@ O painel:
 
 > Um IP que nao respondeu nao esta necessariamente livre. O equipamento pode estar desligado, com firewall ou fora do alcance dos testes. Antes de configurar um IP fixo, confira a faixa dinamica e as reservas do servidor DHCP e valide novamente o endereco.
 
+## Busca, filtros e itens que exigem acao
+
+Depois da varredura, a barra do inventario permite buscar por nome, IP, MAC, fabricante, tipo, porta, responsavel, setor ou IP fixo cadastrado. Tambem e possivel filtrar por tipo de equipamento, prioridade e segmento.
+
+O modo **Somente acao** mostra equipamentos online com prioridade alta/media ou ainda sem tipo confirmado.
+
+## Historico e comparacao
+
+O botao de historico lista as varreduras preservadas no IndexedDB. Uma execucao anterior pode ser comparada com o inventario atual. A interface destaca:
+
+- Equipamento novo.
+- Equipamento que deixou de responder.
+- Porta que apareceu desde a execucao comparada.
+
+A comparacao usa o MAC como identidade principal e o IP quando o MAC nao esta disponivel.
+
+## Cadastro manual
+
+Ao abrir um equipamento, use **Cadastro do equipamento** para informar nome, tipo, IP fixo planejado, responsavel, setor e observacoes. O cadastro e preservado separadamente do historico e reaplicado nas proximas varreduras pelo MAC ou IP.
+
 ## Relatorios
 
-Na area de topologia existem duas exportacoes:
+Na area de topologia existem tres exportacoes:
 
-- **JSON:** preserva os dados completos para auditoria, integracao ou analise tecnica.
-- **HTML:** gera uma versao direta para leitura humana, com icone/tipo, IP, portas, prioridade e acao recomendada sem repetir o equipamento em varias secoes.
+- **Executivo HTML:** resumo para gestao, com cobertura, prioridades, responsaveis e proximas decisoes, sem excesso de portas e evidencias.
+- **Tecnico HTML:** inventario direto com tipo, IP, portas, prioridade, cadastro e acao recomendada.
+- **Tecnico JSON:** preserva todos os dados, servicos, evidencias e campos manuais para auditoria e integracao.
 
 O relatorio e gerado no navegador e salvo na pasta de downloads do usuario.
 
@@ -198,13 +243,30 @@ O relatorio e gerado no navegador e salvo na pasta de downloads do usuario.
 | Variavel | Padrao | Descricao |
 | --- | --- | --- |
 | `PORT` | `3005` | Porta inicial do servidor web |
+| `ALLOW_LAN_ACCESS` | `false` | Quando `true`, permite acesso de outras maquinas da rede |
+| `API_TOKEN` | vazio | Token com pelo menos 24 caracteres, obrigatorio quando o acesso pela rede esta ativo |
 | `OLLAMA_URL` | `http://localhost:11434` | Endereco local do Ollama |
 | `OLLAMA_MODEL` | `qwen2.5:3b` | Modelo usado nos pareceres |
 | `OLLAMA_NUM_CTX` | `2048` | Tamanho do contexto do modelo |
 | `OLLAMA_NUM_THREAD` | `4` | Threads usadas pelo Ollama |
 | `OLLAMA_KEEP_ALIVE` | `0s` | Tempo que o modelo permanece carregado apos responder |
 | `DISABLE_LIVE_SCAN` | `false` | Quando `true`, bloqueia varreduras reais pelo servidor |
+| `MAX_SCAN_ADDRESSES` | `4096` | Quantidade maxima de enderecos por varredura |
+| `MAX_SCAN_TARGETS` | `16` | Quantidade maxima de blocos separados por virgula/espaco |
+| `MAX_CAPTURE_SECONDS` | `20` | Duracao maxima da captura passiva |
+| `API_RATE_LIMIT` | `180` | Requisicoes gerais permitidas por IP a cada minuto |
+| `AUTH_RATE_LIMIT` | `5` | Tentativas de login permitidas por IP a cada 15 minutos |
+| `HEAVY_RATE_LIMIT` | `20` | Varreduras, capturas e analises por IA permitidas por IP a cada 10 minutos |
+| `AUDIT_LOG_PATH` | `logs/runescan-audit.jsonl` | Arquivo de auditoria das varreduras |
 | `APP_URL` | `MY_APP_URL` | URL publica opcional |
+
+O limite padrao de 4096 enderecos permite ate uma rede `/20`. Para um `/16`, divida a execucao em blocos menores ou aumente `MAX_SCAN_ADDRESSES` somente depois de avaliar o impacto na rede.
+
+### Limites e auditoria
+
+Quando um limite e atingido, a API responde com o codigo `429` e informa em quantos segundos uma nova tentativa sera aceita. O limite de operacoes pesadas e compartilhado entre varreduras, capturas passivas e pareceres por IA. O cancelamento de uma varredura ativa continua disponivel mesmo quando o limite geral foi atingido.
+
+Cada varredura valida gera registros no arquivo configurado em `AUDIT_LOG_PATH`, no formato JSON Lines. Sao registrados horario, identificador da varredura, IP de origem, navegador, escopo, duracao e resultado. Tokens, inventarios e respostas da IA nao sao gravados nesse arquivo.
 
 ## Como confirmar se as ferramentas foram reconhecidas
 
@@ -238,6 +300,16 @@ tools\nirsoft\PingInfoView.exe
 - Confira se o firewall permite ICMP, ARP ou as portas testadas.
 - Ative o Nmap para melhorar a descoberta.
 
+### O dispositivo aparece como `host-201` ou com tipo desconhecido
+
+Isso significa que o IP respondeu, mas nao forneceu evidencia suficiente para afirmar se e notebook, celular, impressora ou outro equipamento. Ping e ARP confirmam presenca; eles nao revelam a funcao do dispositivo.
+
+- Mantenha Nmap e NirSoft ativados. O RuneScan combina nome, MAC, fabricante e servicos encontrados pelos diferentes coletores.
+- Use `DNS/Nome` e `Windows Diag` nos detalhes do equipamento para procurar PTR e NetBIOS.
+- Consulte DHCP, DNS ou a controladora UniFi, que normalmente possuem o nome informado durante a concessao ou associacao Wi-Fi.
+- Cadastre nome, tipo, responsavel e setor manualmente quando a rede nao publicar esses dados. A correcao e preservada pelo MAC nas proximas varreduras.
+- Celulares e notebooks podem usar MAC privado/aleatorio. Nesse caso, o fabricante do MAC pode nao representar o fabricante real e o RuneScan evita inventar uma classificacao.
+
 ### Nmap ou TShark aparece como indisponivel
 
 - Feche e abra novamente o PowerShell apos instalar.
@@ -262,6 +334,8 @@ Confirme tambem se `OLLAMA_MODEL` no `.env` corresponde a um modelo instalado.
 ### O navegador mostra resultado antigo
 
 Use o botao de lixeira para limpar o inventario salvo localmente e execute uma nova varredura.
+
+O botao limpa tanto o cache atual no IndexedDB quanto os formatos antigos do `localStorage`.
 
 ## Validacao e build
 
@@ -297,6 +371,6 @@ Os arquivos gerados ficam em `dist/`.
 
 ## Seguranca
 
-O servidor atualmente e voltado para uso local. Ele inicia na interface `0.0.0.0`, portanto pode ficar acessivel para outras maquinas dependendo do firewall do Windows.
+O servidor escuta em `127.0.0.1` por padrao e nao aceita conexoes de outras maquinas. O acesso pela rede precisa ser ativado explicitamente com `ALLOW_LAN_ACCESS=true`; nesse modo, um `API_TOKEN` forte e obrigatorio e todas as APIs ficam protegidas por uma sessao HTTP-only temporaria.
 
-Nao publique o RuneScan diretamente na internet. Para uso compartilhado ou corporativo, adicione autenticacao, limite de requisicoes e restricao de origem antes de liberar o acesso.
+Nao publique o RuneScan diretamente na internet. Para uso compartilhado ou corporativo, mantenha tambem o firewall restrito a rede autorizada. Limite de requisicoes sera tratado em uma etapa posterior.

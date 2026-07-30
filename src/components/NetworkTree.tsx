@@ -1,11 +1,15 @@
 import React, { useMemo } from 'react';
 import { motion } from 'motion/react';
 import { Device, ScanResult } from '../types';
-import { buildHumanActionItems, exportHumanHtmlReport } from '../report';
+import { buildHumanActionItems, exportExecutiveHtmlReport, exportHumanHtmlReport } from '../report';
+import { deviceIdentityKey, type DeviceChange } from '../experience/inventory-experience';
 import { 
   Network, 
   Server, 
   Monitor, 
+  Laptop,
+  Smartphone,
+  Tablet,
   Printer, 
   Wifi, 
   Camera,
@@ -15,7 +19,8 @@ import {
   CircleHelp,
   Globe,
   FileDown,
-  FileText
+  FileText,
+  BriefcaseBusiness,
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -29,7 +34,11 @@ const getIcon = (type: Device['type']) => {
     case 'router': return <Network className="w-5 h-5" />;
     case 'switch': return <Activity className="w-5 h-5" />;
     case 'ap': return <Wifi className="w-5 h-5" />;
+    case 'network': return <Network className="w-5 h-5" />;
     case 'workstation': return <Monitor className="w-5 h-5" />;
+    case 'notebook': return <Laptop className="w-5 h-5" />;
+    case 'phone': return <Smartphone className="w-5 h-5" />;
+    case 'tablet': return <Tablet className="w-5 h-5" />;
     case 'server': return <Server className="w-5 h-5" />;
     case 'camera': return <Camera className="w-5 h-5" />;
     case 'printer': return <Printer className="w-5 h-5" />;
@@ -44,10 +53,12 @@ interface TreeNodeProps {
   allDevices: Device[];
   onSelect: (device: Device) => void;
   level?: number;
+  changes: Record<string, DeviceChange>;
 }
 
-const TreeNode: React.FC<TreeNodeProps> = ({ device, childrenDevices, allDevices, onSelect, level = 0 }) => {
+const TreeNode: React.FC<TreeNodeProps> = ({ device, childrenDevices, allDevices, onSelect, changes, level = 0 }) => {
   const hasWebFingerprint = device.evidence?.some((item) => item.toLowerCase().startsWith('web fingerprint:'));
+  const change = changes[deviceIdentityKey(device)];
 
   return (
     <div className="flex flex-col">
@@ -78,6 +89,9 @@ const TreeNode: React.FC<TreeNodeProps> = ({ device, childrenDevices, allDevices
               )}
               title={device.status === 'offline' ? 'Offline na ultima varredura' : device.riskLevel === 'high' ? 'Online com risco alto' : device.riskLevel === 'medium' ? 'Online com risco medio' : 'Online'}
             />
+            {change?.kind === 'new' && <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[8px] font-black uppercase text-blue-700">novo</span>}
+            {change?.kind === 'removed' && <span className="rounded bg-slate-200 px-1.5 py-0.5 text-[8px] font-black uppercase text-slate-700">removido</span>}
+            {change?.newPorts.length > 0 && <span className="rounded bg-orange-100 px-1.5 py-0.5 text-[8px] font-black uppercase text-orange-700">+ porta {change.newPorts.join(',')}</span>}
           </div>
           <div className="flex items-center gap-2 text-[10px] opacity-60">
             <span className="font-mono">{device.ip}</span>
@@ -97,6 +111,7 @@ const TreeNode: React.FC<TreeNodeProps> = ({ device, childrenDevices, allDevices
               childrenDevices={allDevices.filter(d => d.parentId === child.id)}
               allDevices={allDevices}
               onSelect={onSelect}
+              changes={changes}
               level={level + 1}
             />
           ))}
@@ -110,9 +125,11 @@ interface NetworkTreeProps {
   result: ScanResult | null;
   devices: Device[];
   onSelectDevice: (device: Device) => void;
+  changes?: Record<string, DeviceChange>;
 }
 
-export const NetworkTree: React.FC<NetworkTreeProps> = ({ result, devices, onSelectDevice }) => {
+export const NetworkTree: React.FC<NetworkTreeProps> = ({ result, devices, onSelectDevice, changes = {} }) => {
+  const reportDevices = result?.devices || devices;
   // Encontra dispositivos raiz (sem parentId ou cujo parentId nao existe na lista).
   const rootDevices = useMemo(() => {
     return devices.filter(d => !d.parentId || !devices.find(p => p.id === d.parentId));
@@ -125,8 +142,8 @@ export const NetworkTree: React.FC<NetworkTreeProps> = ({ result, devices, onSel
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => exportScanReport(result, devices)}
-            disabled={!devices.length}
+            onClick={() => exportScanReport(result, reportDevices)}
+            disabled={!reportDevices.length}
             className="flex h-8 w-8 items-center justify-center rounded-md border border-white/10 text-white/70 transition hover:bg-white hover:text-scan-ink disabled:cursor-not-allowed disabled:opacity-30"
             title="Exportar relatorio JSON completo da varredura"
             aria-label="Exportar relatorio JSON"
@@ -135,11 +152,21 @@ export const NetworkTree: React.FC<NetworkTreeProps> = ({ result, devices, onSel
           </button>
           <button
             type="button"
-            onClick={() => exportHumanHtmlReport(result, devices)}
-            disabled={!devices.length}
+            onClick={() => exportExecutiveHtmlReport(result, reportDevices)}
+            disabled={!reportDevices.length}
             className="flex h-8 w-8 items-center justify-center rounded-md border border-white/10 text-white/70 transition hover:bg-white hover:text-scan-ink disabled:cursor-not-allowed disabled:opacity-30"
-            title="Exportar relatorio HTML executivo"
-            aria-label="Exportar relatorio HTML"
+            title="Exportar relatorio executivo resumido"
+            aria-label="Exportar relatorio executivo"
+          >
+            <BriefcaseBusiness className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => exportHumanHtmlReport(result, reportDevices)}
+            disabled={!reportDevices.length}
+            className="flex h-8 w-8 items-center justify-center rounded-md border border-white/10 text-white/70 transition hover:bg-white hover:text-scan-ink disabled:cursor-not-allowed disabled:opacity-30"
+            title="Exportar relatorio tecnico HTML"
+            aria-label="Exportar relatorio tecnico HTML"
           >
             <FileText className="h-4 w-4" />
           </button>
@@ -153,6 +180,7 @@ export const NetworkTree: React.FC<NetworkTreeProps> = ({ result, devices, onSel
             childrenDevices={devices.filter(d => d.parentId === device.id)}
             allDevices={devices}
             onSelect={onSelectDevice}
+            changes={changes}
           />
         ))}
         {devices.length === 0 && (
@@ -217,6 +245,12 @@ function exportScanReport(result: ScanResult | null, devices: Device[]) {
       riskLevel: device.riskLevel || null,
       services: device.services || [],
       evidence: device.evidence || [],
+      fixedIp: device.fixedIp || null,
+      responsible: device.responsible || null,
+      department: device.department || null,
+      notes: device.notes || null,
+      identitySource:
+        device.identitySource || (device.confidence === 'high' ? 'detected' : 'inferred'),
     })),
   };
 
@@ -465,7 +499,7 @@ function exportLegacyHtmlReport(result: ScanResult | null, devices: Device[]) {
     ${rows}
 
     <footer>
-      RuneScan Network Intelligence • pilgrims.dev • &copy; ${new Date().getFullYear()}
+      RuneScan Network Intelligence • Rune Projects • &copy; ${new Date().getFullYear()}
     </footer>
   </div>
 </body>
